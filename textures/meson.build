@@ -1,2 +1,7 @@
 fs.copyfile('character.png')
 fs.copyfile('arm.png')
+fs.copyfile('house.png')
+fs.copyfile('intersection.png')
+fs.copyfile('road_vertical.png')
+fs.copyfile('road_horizontal.png')
+fs.copyfile('depot.png')
