@@ -42,7 +42,7 @@ struct Transform
         matrix[0] = glm::vec4(cosAngle, sinAngle, 0.0f, 0.0f);
         matrix[1] = glm::vec4(-sinAngle, cosAngle, 0.0f, 0.0f);
         matrix[2] = glm::vec4(0.0f, 0.0f, 1.0f, 0.0f);
-        matrix[3] = glm::vec4(position, depth, 1.0f);
+        matrix[3] = glm::vec4(position, 0.0f, 1.0f);
 
         return matrix;
     }
@@ -52,6 +52,7 @@ struct SceneGraphNode
 {
     Transform local;
     Transform world;
+    float heightForDepth = 0; // amount to subtract from y-coord to get to front edge of sprite, for depth sorting purposes. only applies for top-level
     uint32_t parent = 0;
     std::vector<uint32_t> children;
     bool dirty = true;
@@ -81,13 +82,31 @@ struct DrawLayer
     glm::mat4 cameraMatrix;
 };
 
-struct Player
+struct Character
 {
     uint32_t weapon;
     uint32_t backShoulder;
     uint32_t backHand;
     uint32_t frontShoulder;
     uint32_t frontHand;
+    std::vector<uint32_t> spriteIndices;
+    bool flipHorizontal;
+};
+
+struct WeaponAnimation
+{
+    std::vector<float> poseAngles;
+    std::vector<float> poseTimes;
+    std::vector<bool> poseSharp;
+};
+
+struct WeaponDescription
+{
+    const WeaponAnimation* animation;
+    float damage;
+    glm::vec2 size;
+    glm::vec4 color;
+    GLuint texture;
 };
 
 struct Weapon
@@ -102,10 +121,8 @@ struct Weapon
     uint64_t stateTimer;
     bool sharp;
     float damage;
-
-    std::vector<float> poseAngles;
-    std::vector<float> poseTimes;
-    std::vector<bool> poseSharp;
+    bool flipHorizontal;
+    const WeaponAnimation* animation;
 };
 
 struct Enemy
@@ -117,6 +134,16 @@ struct Enemy
     float speed;
     State state = State::Idle;
     glm::vec2 moveInput;
+    float attackRechargeTime;
+    float turnDelayTime;
+    float turnDelayTimeAccumulator = 0;
+    bool wantToFace = false;
+};
+
+struct Player
+{
+    float speed;
+    float acceleration;
 };
 
 struct Health
@@ -133,6 +160,13 @@ struct Health
     State state;
     uint64_t stateTimer;
     bool takingDamage;
+    uint32_t healthBar;
+};
+
+struct Hurtbox
+{
+    float multiplier;
+    uint32_t owner;
 };
 
 struct Dynamic
@@ -262,10 +296,17 @@ class SceneGraph : public ComponentManager<SceneGraphNode>
                 found = true;
             }
         }
-        if (found && childIndex < parent.children.size() - 1)
+        if (found)
         {
-            parent.children[childIndex] = parent.children.back();
+            if (childIndex < parent.children.size() - 1)
+            {
+                parent.children[childIndex] = parent.children.back();
+            }
             parent.children.pop_back();
+        }
+        else
+        {
+            std::cerr << "Warning: didn't find child. Transform hierarchy data is suspect" << std::endl;
         }
     }
 
@@ -359,6 +400,12 @@ public:
         setDirty(index);
     }
 
+    void setHeightForDepth(uint32_t index, float heightForDepth)
+    {
+        get(index).heightForDepth = heightForDepth;
+        setDirty(index);
+    }
+
     const Transform& getLocalTransform(uint32_t index) const
     {
         return get(index).local;
@@ -377,6 +424,10 @@ public:
                 node.world.position = parentTransform.position + glm::vec2(cosAngle * node.local.position.x - sinAngle * node.local.position.y, sinAngle * node.local.position.x + cosAngle * node.local.position.y);
                 node.world.rotation = parentTransform.rotation + node.local.rotation;
                 node.world.depth = parentTransform.depth + node.local.depth;
+                if (node.parent == 0)
+                {
+                    node.world.depth -= (node.local.position.y - node.heightForDepth);
+                }
             }
             else
             {
@@ -388,6 +439,26 @@ public:
         return node.world;
     }
 
+    void destroyHierarchy(EntityManager& entityManager, uint32_t index, int callLevel = 0)
+    {
+        SceneGraphNode& node = get(index);
+        for (auto childIndex : node.children)
+        {
+            destroyHierarchy(entityManager, childIndex, callLevel + 1);
+        }
+        entityManager.destroy(index);
+    }
+
+    template<typename Fn, typename ... Args>
+    decltype(auto) recurse(uint32_t index, const Fn& fn, const Args& ... args)
+    {
+        SceneGraphNode& node = get(index);
+        for (auto childIndex : node.children)
+        {
+            recurse(childIndex, fn, args...);
+        }
+        return fn(index, args...);
+    }
 };
 
 class UniformBufferManager
@@ -606,7 +677,7 @@ public:
     }
 };
 
-static glm::mat4 rotationMat2(float rotation)
+static glm::mat2 rotationMat2(float rotation)
 {
     float cosAngle = std::cos(rotation);
     float sinAngle = std::sin(rotation);
@@ -638,33 +709,33 @@ static CollisionRecord collideBoxes(const Transform& transform0, const glm::vec2
     glm::vec2 e10 = ar10 * e1;  // the half extents of b1 in the rotated frame of b0
     
     CollisionRecord result {};
-    // result.b0_reference = true;
 
     // test b0 x axis
     auto depth = result.depth = std::abs(d0.x) - e0.x - e10.x;
     result.axis = r0[0];
-    // result.reference_face = face_id::pos_x;
-    // result.reference_axis = axis_id::x;
-    if (d0.x < 0) {
+    if (d0.x < 0)
+    {
         result.axis = -result.axis;
-        // result.reference_face = face_id::neg_x;
     }
-    if (depth > 0) {  // separating axis found
+    if (depth > 0)
+    {
         return result;
     }
 
     // test b0 y axis
     depth = std::abs(d0.y) - e0.y - e10.y;
-    if (depth > result.depth) {
+    if (depth > result.depth)
+    {
         result.depth = depth;
         result.axis = r0[1];
-        /* result.reference_face = face_id::pos_y;
-        result.reference_axis = axis_id::y; */
-        if (d0.y < 0) {
+        if (d0.y < 0)
+        {
             result.axis = -result.axis;
-            // result.reference_face = face_id::neg_y;
         }
-        if (depth > 0) return result;
+        if (depth > 0)
+        {
+            return result;
+        }
     }
 
     // test b1 axes
@@ -674,30 +745,29 @@ static CollisionRecord collideBoxes(const Transform& transform0, const glm::vec2
 
     // test b1 x axis
     depth = std::abs(d1.x) - e1.x - e01.x;
-    if (depth > result.depth) {
+    if (depth > result.depth)
+    {
         result.depth = depth;
-        /* result.b0_reference = false;
-        result.reference_axis = axis_id::x; */
         result.axis = -r1[0];
-        // result.reference_face = face_id::pos_x;  // inverted since d points from 0 to 1
-        if (d1.x > 0) {
+        if (d1.x > 0)
+        {
             result.axis = -result.axis;
-            // result.reference_face = face_id::neg_x;
         }
-        if (depth > 0) return result;
+        if (depth > 0)
+        {
+            return result;
+        }
     }
 
     // test b1 y axis
     depth = std::abs(d1.y) - e1.y - e01.y;
-    if (depth > result.depth) {
+    if (depth > result.depth)
+    {
         result.depth = depth;
-        // result.b0_reference = false;
-        // result.reference_axis = axis_id::y;
         result.axis = -r1[1];
-        // result.reference_face = face_id::pos_y;  // inverted since d points from 0 to 1
-        if (d1.y > 0) {
+        if (d1.y > 0)
+        {
             result.axis = -result.axis;
-            // result.reference_face = face_id::neg_y;
         }
     }
 
@@ -707,32 +777,71 @@ static CollisionRecord collideBoxes(const Transform& transform0, const glm::vec2
 struct ColliderInfo
 {
     glm::vec2 halfExtents;
+    glm::vec2 aabbMin, aabbMax;
 };
 
 class CollisionWorld : public ComponentManager<ColliderInfo>
 {
     std::vector<CollisionRecord> collisionRecords;
+    std::vector<uint32_t> sortIndices;
+    std::vector<uint32_t> intervals;
 
 public:
     void update(SceneGraph& sceneGraph)
     {
-        collisionRecords.clear();
-        for (uint32_t i = 0; i < all().size(); ++i)
+        for (auto index : indices())
         {
-            uint32_t index0 = indices()[i];
-            const ColliderInfo& collider0 = all()[i];
-            for (uint32_t j = i + 1; j < all().size(); ++j)
-            {
-                uint32_t index1 = indices()[j];
-                const ColliderInfo& collider1 = all()[j];
-                auto result = collideBoxes(sceneGraph.getWorldTransform(index0), collider0.halfExtents, sceneGraph.getWorldTransform(index1), collider1.halfExtents);
-                if (result.depth < 0)
+            const auto& worldTransform = sceneGraph.getWorldTransform(index);
+            auto m = rotationMat2(worldTransform.rotation);
+            m = glm::mat2(glm::abs(m[0]), glm::abs(m[1]));
+            auto& collider = get(index);
+            collider.aabbMax = m * collider.halfExtents;
+            collider.aabbMin = worldTransform.position - collider.aabbMax;
+            collider.aabbMax = worldTransform.position + collider.aabbMax;
+        }
+
+        sortIndices.assign(indices().begin(), indices().end());
+        std::sort(sortIndices.begin(), sortIndices.end(), [this] (auto index0, auto index1)
                 {
-                    result.index0 = index0;
-                    result.index1 = index1;
-                    collisionRecords.push_back(result);
+                    return get(index0).aabbMin.x < get(index1).aabbMin.x;
+                });
+
+        collisionRecords.clear();
+        intervals.clear();
+        for (auto index0 : sortIndices)
+        {
+            // remove inactive intervals
+            uint32_t currentInterval = 0;
+            const auto& collider0 = get(index0);
+            for (uint32_t i = 0; i < intervals.size(); ++i)
+            {
+                auto index1 = intervals[i];
+                const auto& collider1 = get(index1);
+                if (collider1.aabbMax.x < collider0.aabbMin.x)
+                {
+                    continue;
+                }
+                intervals[currentInterval++] = index1;
+            }
+            intervals.resize(currentInterval);
+
+            // test aabbs and add pairs
+            for (auto index1 : intervals)
+            {
+                const auto& collider1 = get(index1);
+                if (collider0.aabbMax.x >= collider1.aabbMin.x && collider0.aabbMax.y >= collider1.aabbMin.y && collider1.aabbMax.x > collider0.aabbMin.x && collider1.aabbMax.y >= collider0.aabbMin.y)
+                {
+                    auto result = collideBoxes(sceneGraph.getWorldTransform(index0), collider0.halfExtents, sceneGraph.getWorldTransform(index1), collider1.halfExtents);
+                    if (result.depth < 0)
+                    {
+                        result.index0 = index0;
+                        result.index1 = index1;
+                        collisionRecords.push_back(result);
+                    }
                 }
             }
+
+            intervals.push_back(index0);
         }
     }
 
@@ -756,289 +865,219 @@ static void updateVelocity(Dynamic& body, const glm::vec2& targetVelocity, float
     }
 }
 
-int main(int argc, char** argv)
+struct CharacterDescription
 {
-    GLFWWrapper glfwWrapper;
+    glm::vec4 color { 1.0 };
+    glm::vec2 frontShoulderPosition { .28125, 0.875 };
+    glm::vec2 backShoulderPosition { -0.0625, 0.875 };
+    glm::vec2 armDrawSize { 0.3125, 1.0 };
+    glm::vec2 bodyDrawSize { 1.0, 2.0 };
+    glm::vec2 baseSize { 1.0, 1.0 };
+    glm::vec2 bodyHurtboxPosition;
+    glm::vec2 bodyHurtboxSize;
+    float bodyHurtboxMultiplier;
+    glm::vec2 headHurtboxPosition;
+    glm::vec2 headHurtboxSize;
+    float headHurtboxMultiplier;
+    glm::vec2 armHurtboxSize;
+    float armHurtboxMultiplier;
+    float armLength = 0.75f;
+    GLuint characterTexture;
+    GLuint armTexture;
+    float mass;
+    float maxHealth;
+};
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    GLFWwindow* window = createWindow(1920, 1080, "Window");
-    glfwMakeContextCurrent(window);
-
-    if (!gladLoadGL())
-    {
-        throw std::runtime_error("gladLoadGL failed");
-    }
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    GLuint shaderProgram = 0;
-    {
-        GLuint vertexShader = loadShader("shaders/vertex.glsl", GL_VERTEX_SHADER);
-        GLuint fragmentShader = loadShader("shaders/fragment.glsl", GL_FRAGMENT_SHADER);
-        shaderProgram = createShaderProgram({ vertexShader, fragmentShader });
-        glDeleteShader(vertexShader);
-        glDeleteShader(fragmentShader);
-    }
-
-    glUniformBlockBinding(shaderProgram, glGetUniformBlockIndex(shaderProgram, "TransformData"), 0);
-    glUniformBlockBinding(shaderProgram, glGetUniformBlockIndex(shaderProgram, "MaterialData"), 1);
-
-    glUniform1i(glGetUniformLocation(shaderProgram, "textureSampler"), 0);
-
-    GLuint vertexArray;
-    glGenVertexArrays(1, &vertexArray);
-    glBindVertexArray(vertexArray);
-
+struct Scene
+{
     SceneGraph sceneGraph;
     CollisionWorld collisionWorld;
-    Renderer renderer;
     ComponentManager<Enemy> enemies;
-    ComponentManager<Player> players;
+    ComponentManager<Character> characters;
     ComponentManager<Weapon> weapons;
     ComponentManager<Health> healthComponents;
-    // DrawInstanceManager drawInstances;
+    ComponentManager<Hurtbox> hurtboxes;
     ComponentManager<DrawInstance> drawInstances;
     ComponentManager<Dynamic> dynamics;
-
+    ComponentManager<Player> players;
     EntityManager entityManager;
-    entityManager.addComponentManager(sceneGraph);
-    entityManager.addComponentManager(collisionWorld);
-    entityManager.addComponentManager(enemies);
-    entityManager.addComponentManager(drawInstances);
-    entityManager.addComponentManager(players);
-    entityManager.addComponentManager(weapons);
-    entityManager.addComponentManager(healthComponents);
-    entityManager.addComponentManager(dynamics);
+    std::vector<uint32_t> died;
 
-    float cameraViewHeight = 20.0f;
-    glm::vec2 cameraPosition(0, 0);
-
-    std::vector<GLuint> textures;
-
-    auto characterTexture = textures.emplace_back(loadTexture("textures/character.png"));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    auto armTexture = textures.emplace_back(loadTexture("textures/arm.png"));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    for (auto i = 0; i < 100; ++i)
+    Scene()
     {
-        uint32_t index = entityManager.create();
+        entityManager.addComponentManager(sceneGraph);
+        entityManager.addComponentManager(collisionWorld);
+        entityManager.addComponentManager(enemies);
+        entityManager.addComponentManager(drawInstances);
+        entityManager.addComponentManager(characters);
+        entityManager.addComponentManager(weapons);
+        entityManager.addComponentManager(healthComponents);
+        entityManager.addComponentManager(dynamics);
+        entityManager.addComponentManager(hurtboxes);
+        entityManager.addComponentManager(players);
+    }
 
-        enemies.create(index);
-        Enemy& enemy = enemies.get(index);
-        enemy.speed = 2.0f;
-        enemy.moveInput = glm::vec2(0.0f);
-        enemy.state = Enemy::State::Idle;
+    void setCharacterFlipHorizontal(uint32_t index, bool flipHorizontal)
+    {
+        auto& character = characters.get(index);
+        if (character.flipHorizontal != flipHorizontal)
+        {
+            for (auto spriteIndex : character.spriteIndices)
+            {
+                auto& instance = drawInstances.get(spriteIndex);
+                instance.flipHorizontal = !instance.flipHorizontal;
+            }
+            float prevFrontShoulderRotation = sceneGraph.getLocalTransform(character.frontShoulder).rotation;
+            sceneGraph.setPosition(character.frontShoulder, glm::vec2(-1, 1) * sceneGraph.getLocalTransform(character.frontShoulder).position);
+            sceneGraph.setRotation(character.frontShoulder, -sceneGraph.getLocalTransform(character.backShoulder).rotation);
+            sceneGraph.setPosition(character.backShoulder, glm::vec2(-1, 1) * sceneGraph.getLocalTransform(character.backShoulder).position);
+            sceneGraph.setRotation(character.backShoulder, -prevFrontShoulderRotation);
+            if (character.weapon)
+            {
+                auto& weapon = weapons.get(character.weapon);
+                if (flipHorizontal)
+                {
+                    weapon.armPivot = character.backShoulder;
+                    sceneGraph.setParent(character.weapon, character.backHand);
+                }
+                else
+                {
+                    weapon.armPivot = character.frontShoulder;
+                    sceneGraph.setParent(character.weapon, character.frontHand);
+                }
+                sceneGraph.setRotation(character.weapon, -sceneGraph.getLocalTransform(character.weapon).rotation);
+                weapon.flipHorizontal = flipHorizontal;
+            }
+            character.flipHorizontal = flipHorizontal;
+        }
+    }
 
+    void addHealthComponent(uint32_t index, float maxHealth)
+    {
         healthComponents.create(index);
         auto& health = healthComponents.get(index);
-        health.healthyColor = { 0.5, 1.0, 0.7, 1.0 };
-        health.damagedColor = { 0.6, 0.6, 0.1, 1.0 };
-        health.invincibleColor = { 1.0, 0.0, 0.0 , 1.0};
-        health.max = 10.0f;
-        health.value = 10.0f;
+        health.healthyColor = { 0.0, 1.0, 0.0, 1.0 };
+        health.damagedColor = { 1.0, 0.0, 0.0, 1.0 };
+        health.invincibleColor = { 1.0, 1.0, 0.0 , 1.0};
+        health.max = maxHealth;
+        health.value = maxHealth;
         health.state = Health::State::Normal;
+        health.healthBar = entityManager.create();
+        sceneGraph.create(health.healthBar, index);
+        sceneGraph.setPosition(health.healthBar, { 0, -1 });
+        drawInstances.create(health.healthBar);
+        auto& instance = drawInstances.get(health.healthBar);
+        instance.color = health.healthyColor;
+        instance.size = { 1.0, 0.25f };
+    }
 
+    uint32_t createSprite(uint32_t parent, const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, GLuint texture, bool flipHorizontal = false)
+    {
+        auto index = entityManager.create();
+        sceneGraph.create(index, parent);
+        sceneGraph.setPosition(index, position);
         drawInstances.create(index);
         auto& instance = drawInstances.get(index);
-        instance.color = { 0.5, 1.0, 0.7, 1.0 };
-        instance.size = { 1.0, 2.0 };
-        instance.texture = characterTexture;
+        instance.color = color;
+        instance.size = size;
+        instance.texture = texture;
+        instance.flipHorizontal = flipHorizontal;
+        return index;
+    }
 
+    uint32_t createHurtbox(uint32_t parent, uint32_t owner, const glm::vec2& position, const glm::vec2& size, float multiplier)
+    {
+        auto index = entityManager.create();
+        sceneGraph.create(index, parent);
+        sceneGraph.setPosition(index, position);
+        hurtboxes.create(index);
+        auto& hurtbox = hurtboxes.get(index);
+        hurtbox.multiplier = multiplier;
+        hurtbox.owner = owner;
+        collisionWorld.create(index);
+        auto& collider = collisionWorld.get(index);
+        collider.halfExtents = 0.5f * size;
+        return index;
+    }
+
+    uint32_t createWeapon(uint32_t owner, const WeaponDescription& description)
+    {
+        auto& character = characters.get(owner);
+        auto index = entityManager.create();
+        character.weapon = index;
+        weapons.create(index);
+        Weapon& weapon = weapons.get(index);
+        weapon.state = Weapon::State::Idle;
+        weapon.owner = owner;
+        weapon.armPivot = character.frontShoulder;
+        weapon.damage = description.damage;
+        weapon.animation = description.animation;
+        drawInstances.create(index);
+        auto& instance = drawInstances.get(index);
+        instance.color = description.color;
+        instance.size = description.size;
+        instance.texture = description.texture;
+        sceneGraph.create(index, character.frontHand);
+        sceneGraph.setPosition(index, { 0, 0.5f * description.size.y });
+        collisionWorld.create(index);
+        auto& collider = collisionWorld.get(index);
+        collider.halfExtents = 0.5f * description.size;
+        return index;
+    }
+
+    uint32_t createCharacter(const CharacterDescription& description)
+    {
+        uint32_t index = entityManager.create();
         sceneGraph.create(index);
-        sceneGraph.setPosition(index, glm::linearRand(glm::vec2(-20), glm::vec2(20)));
 
         collisionWorld.create(index);
         auto& collider = collisionWorld.get(index);
-        collider.halfExtents = { 0.5, 1.0 };
+        collider.halfExtents = 0.5f * description.baseSize;
 
         dynamics.create(index);
         auto& body = dynamics.get(index);
-        body.mass = 10.0f;
+        body.mass = description.mass;
         body.damping = 0.1f;
+
+        addHealthComponent(index, description.maxHealth);
+
+        characters.create(index);
+        auto& character = characters.get(index);
+
+        character.frontShoulder = entityManager.create();
+        sceneGraph.create(character.frontShoulder, index);
+        sceneGraph.setPosition(character.frontShoulder, description.frontShoulderPosition);
+        sceneGraph.setDepth(character.frontShoulder, 0.1f);
+
+        character.frontHand = entityManager.create();
+        sceneGraph.create(character.frontHand, character.frontShoulder);
+        sceneGraph.setPosition(character.frontHand, { 0, -description.armLength });
+        sceneGraph.setRotation(character.frontHand, M_PI_2f);
+
+        character.backShoulder = entityManager.create();
+        sceneGraph.create(character.backShoulder, index);
+        sceneGraph.setPosition(character.backShoulder, description.backShoulderPosition);
+        sceneGraph.setDepth(character.backShoulder, -0.1f);
+
+        character.backHand = entityManager.create();
+        sceneGraph.create(character.backHand, character.backShoulder);
+        sceneGraph.setPosition(character.backHand, { 0, -description.armLength });
+        sceneGraph.setRotation(character.backHand, -M_PI_2f);
+
+        character.spriteIndices.push_back(createSprite(index, { 0, 0.5f * (description.bodyDrawSize.y - description.baseSize.y) }, description.bodyDrawSize, description.color, description.characterTexture));
+        character.spriteIndices.push_back(createSprite(character.frontShoulder, { 0, -0.5f * description.armLength }, description.armDrawSize, description.color, description.armTexture));
+        character.spriteIndices.push_back(createSprite(character.backShoulder, { 0, -0.5f * description.armLength }, description.armDrawSize, description.color, description.armTexture, true));
+
+        createHurtbox(index, index, description.bodyHurtboxPosition, description.bodyHurtboxSize, description.bodyHurtboxMultiplier);
+        createHurtbox(index, index, description.headHurtboxPosition, description.headHurtboxSize, description.headHurtboxMultiplier);
+        createHurtbox(character.frontShoulder, index, { 0, -0.5f * description.armLength }, description.armHurtboxSize, description.armHurtboxMultiplier);
+        createHurtbox(character.backShoulder, index, { 0, -0.5f * description.armLength }, description.armHurtboxSize, description.armHurtboxMultiplier);
+
+        return index;
     }
 
-    uint32_t player = entityManager.create();
+    void updateWeapons(uint64_t timerValue)
     {
-        players.create(player);
-
-        healthComponents.create(player);
-        auto& health = healthComponents.get(player);
-        health.healthyColor = { 1.0, 1.0, 1.0, 1.0 };
-        health.damagedColor = { 0.6, 0.2, 0.3, 1.0 };
-        health.invincibleColor = { 1.0, 0.0, 0.0 , 1.0};
-        health.max = 100.0f;
-        health.value = 100.0f;
-        health.state = Health::State::Normal;
-
-        drawInstances.create(player);
-        auto& instance = drawInstances.get(player);
-        instance.color = { 1.0, 1.0, 1.0, 1.0 };
-        instance.size = { 1.0, 2.0 };
-        instance.texture = characterTexture;
-
-        sceneGraph.create(player);
-
-        collisionWorld.create(player);
-        auto& collider = collisionWorld.get(player);
-        collider.halfExtents = { 0.5, 1.0 };
-
-        dynamics.create(player);
-        auto& body = dynamics.get(player);
-        body.mass = 10.0f;
-        body.damping = 0.1f;
-    }
-
-    {
-        constexpr glm::vec2 frontShoulderPosition { .28125, 0.375 };
-        constexpr glm::vec2 backShoulderPosition { -0.0625, 0.375 };
-        constexpr glm::vec2 armDrawSize { 0.3125, 1.0 };
-        constexpr float armLength = 0.75f;
-
-        auto& playerComponent = players.get(player);
-        playerComponent.frontShoulder = entityManager.create();
-        sceneGraph.create(playerComponent.frontShoulder, player);
-        sceneGraph.setPosition(playerComponent.frontShoulder, frontShoulderPosition);
-        sceneGraph.setDepth(playerComponent.frontShoulder, 0.1f);
-
-        {
-            auto arm = entityManager.create();
-            sceneGraph.create(arm, playerComponent.frontShoulder);
-            sceneGraph.setPosition(arm, { 0, -armLength / 2 });
-            drawInstances.create(arm);
-            auto& instance = drawInstances.get(arm);
-            instance.color = glm::vec4(1.0f);
-            instance.size = armDrawSize;
-            instance.texture = armTexture;
-        }
-
-        playerComponent.frontHand = entityManager.create();
-        sceneGraph.create(playerComponent.frontHand, playerComponent.frontShoulder);
-        sceneGraph.setPosition(playerComponent.frontHand, { 0, -armLength });
-        sceneGraph.setRotation(playerComponent.frontHand, M_PI_2f);
-
-        playerComponent.backShoulder = entityManager.create();
-        sceneGraph.create(playerComponent.backShoulder, player);
-        sceneGraph.setPosition(playerComponent.backShoulder, backShoulderPosition);
-        sceneGraph.setDepth(playerComponent.backShoulder, -0.1f);
-
-        {
-            auto arm = entityManager.create();
-            sceneGraph.create(arm, playerComponent.backShoulder);
-            sceneGraph.setPosition(arm, { 0, -armLength / 2 });
-            drawInstances.create(arm);
-            auto& instance = drawInstances.get(arm);
-            instance.color = glm::vec4(1.0f);
-            instance.size = armDrawSize;
-            instance.texture = armTexture;
-            instance.flipHorizontal = true;
-        }
-
-        playerComponent.backHand = entityManager.create();
-        sceneGraph.create(playerComponent.backHand, playerComponent.backShoulder);
-        sceneGraph.setPosition(playerComponent.backHand, { 0, -armLength });
-        sceneGraph.setRotation(playerComponent.backHand, M_PI_2f);
-
-        playerComponent.weapon = entityManager.create();
-        weapons.create(playerComponent.weapon);
-        Weapon& weapon = weapons.get(playerComponent.weapon);
-        weapon.poseAngles = { 0.0f, -M_PI_2f, M_PI_4f, 0.0f };
-        weapon.poseTimes = { 0.0f, 0.1f, 0.2f, 0.45f };
-        weapon.poseSharp = { false, true, false, false };
-        weapon.state = Weapon::State::Idle;
-        weapon.owner = player;
-        weapon.armPivot = playerComponent.frontShoulder;
-        drawInstances.create(playerComponent.weapon);
-        auto& instance = drawInstances.get(playerComponent.weapon);
-        instance.color = { 0.8, 0.8, 0.8, 1.0 };
-        instance.size = { 0.1, 0.5 };
-        instance.texture = 0;
-        sceneGraph.create(playerComponent.weapon, playerComponent.frontHand);
-        sceneGraph.setPosition(playerComponent.weapon, { 0, 0.25f });
-        collisionWorld.create(playerComponent.weapon);
-        auto& collider = collisionWorld.get(playerComponent.weapon);
-        collider.halfExtents = { 0.05, 0.25f };
-    }
-
-    {
-        uint32_t index = entityManager.create();
-        drawInstances.create(index);
-        auto& instance = drawInstances.get(index);
-        instance.color = { 0.8, 0.3, 0.2, 1.0 };
-        instance.size = { 3, 2 };
-        instance.texture = 0;
-        sceneGraph.create(index);
-        sceneGraph.setPosition(index, { 0, -5 });
-        collisionWorld.create(index);
-        auto& collider = collisionWorld.get(index);
-        collider.halfExtents = { 1.5, 1.0 };
-        dynamics.create(index);
-    }
-
-    float playerSpeed = 5.0f;
-    float playerAcceleration = 25.0f;
-    
-    uint64_t timerValue = glfwGetTimerValue();
-
-    std::vector<uint32_t> died;
-
-    while (!glfwWindowShouldClose(window))
-    {
-        glfwPollEvents();
-
-        float dt;
-        {
-            uint64_t previousTimer = timerValue;
-            timerValue = glfwGetTimerValue();
-            dt = static_cast<float>(static_cast<double>(timerValue - previousTimer) / static_cast<double>(glfwGetTimerFrequency()));
-        }
-
-        int windowWidth, windowHeight;
-        glfwGetFramebufferSize(window, &windowWidth, &windowHeight);
-
-        double cursorX, cursorY;
-        glfwGetCursorPos(window, &cursorX, &cursorY);
-        std::cout << cursorX << " " << cursorY << std::endl;
-
-        glm::vec2 moveInput(0.0f);
-        if (glfwGetKey(window, GLFW_KEY_W))
-        {
-            moveInput.y += 1;
-        }
-        if (glfwGetKey(window, GLFW_KEY_S))
-        {
-            moveInput.y -= 1;
-        }
-        if (glfwGetKey(window, GLFW_KEY_A))
-        {
-            moveInput.x -= 1;
-        }
-        if (glfwGetKey(window, GLFW_KEY_D))
-        {
-            moveInput.x += 1;
-        }
-
-        glm::vec2 targetVelocity(0);
-        if (glm::dot(moveInput, moveInput) > 0.0001)
-        {
-            targetVelocity = glm::normalize(moveInput) * playerSpeed;
-        }
-        updateVelocity(dynamics.get(player), targetVelocity, playerAcceleration, dt);
-
-        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT))
-        {
-            auto& weapon = weapons.get(players.get(player).weapon);
-            if (weapon.state == Weapon::State::Idle)
-            {
-                weapon.state = Weapon::State::Swing;
-                weapon.stateTimer = timerValue;
-            }
-        }
-
         for (auto index : weapons.indices())
         {
             auto& weapon = weapons.get(index);
@@ -1046,15 +1085,18 @@ int main(int argc, char** argv)
             if (weapon.state == Weapon::State::Swing)
             {
                 uint32_t poseIndex = 1;
-                for (; poseIndex < weapon.poseTimes.size() && stateTime > weapon.poseTimes[poseIndex]; ++poseIndex);
-                if (poseIndex < weapon.poseTimes.size())
+                const auto& animation = *weapon.animation;
+                for (; poseIndex < animation.poseTimes.size() && stateTime > animation.poseTimes[poseIndex]; ++poseIndex);
+                if (poseIndex < animation.poseTimes.size())
                 {
-                    float angle0 = weapon.poseAngles[poseIndex - 1];
-                    float angle1 = weapon.poseAngles[poseIndex];
-                    float time0 = weapon.poseTimes[poseIndex - 1];
-                    float time1 = weapon.poseTimes[poseIndex];
-                    weapon.sharp = weapon.poseSharp[poseIndex - 1];
-                    sceneGraph.setRotation(weapon.armPivot, angle0 + (angle1 - angle0) * (stateTime - time0) / (time1 - time0));
+                    float angle0 = animation.poseAngles[poseIndex - 1];
+                    float angleSpan = animation.poseAngles[poseIndex] - angle0;
+                    float time0 = animation.poseTimes[poseIndex - 1];
+                    float timeSpan = animation.poseTimes[poseIndex] - time0;
+                    float angle = angle0 + angleSpan * (stateTime - time0) / timeSpan;
+                    weapon.sharp = animation.poseSharp[poseIndex - 1];
+
+                    sceneGraph.setRotation(weapon.armPivot, weapon.flipHorizontal ? -angle : angle);
                 }
                 else
                 {
@@ -1063,13 +1105,84 @@ int main(int argc, char** argv)
                 }
             }
         }
+    }
 
+    void updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosition, uint64_t timerValue, float dt)
+    {
+        for (auto index : players.indices())
+        {
+            const auto& player = players.get(index);
+            glm::vec2 playerToCursor = cursorScenePosition - sceneGraph.getWorldTransform(index).position;
+            if (playerToCursor.x > 0.2f)
+            {
+                setCharacterFlipHorizontal(index, true);
+            }
+            else if (playerToCursor.x < -0.2f)
+            {
+                setCharacterFlipHorizontal(index, false);
+            }
+
+            glm::vec2 moveInput(0.0f);
+            if (glfwGetKey(window, GLFW_KEY_W))
+            {
+                moveInput.y += 1;
+            }
+            if (glfwGetKey(window, GLFW_KEY_S))
+            {
+                moveInput.y -= 1;
+            }
+            if (glfwGetKey(window, GLFW_KEY_A))
+            {
+                moveInput.x -= 1;
+            }
+            if (glfwGetKey(window, GLFW_KEY_D))
+            {
+                moveInput.x += 1;
+            }
+
+            glm::vec2 targetVelocity(0);
+            if (glm::dot(moveInput, moveInput) > 0.0001)
+            {
+                targetVelocity = glm::normalize(moveInput) * player.speed;
+            }
+            updateVelocity(dynamics.get(index), targetVelocity, player.acceleration, dt);
+
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT))
+            {
+                auto& weapon = weapons.get(characters.get(index).weapon);
+                if (weapon.state == Weapon::State::Idle)
+                {
+                    weapon.state = Weapon::State::Swing;
+                    weapon.stateTimer = timerValue;
+                }
+            }
+        }
+    }
+
+    void updateEnemyAI(uint64_t timerValue, float dt)
+    {
         for (auto index : enemies.indices())
         {
             auto& enemy = enemies.get(index);
+            auto& character = characters.get(index);
+
+            uint32_t target = 0;
+            glm::vec2 toPlayer(0);
+            float toPlayerDistance = 0;
+            for (auto playerIndex : players.indices())
+            { 
+                glm::vec2 to = sceneGraph.getWorldTransform(playerIndex).position - sceneGraph.getWorldTransform(index).position;
+                float tod2 = glm::dot(to, to);
+                if (!target || tod2 < toPlayerDistance)
+                {
+                    target = playerIndex;
+                    toPlayerDistance = tod2;
+                    toPlayer = to;
+                }
+            }
+
             enemy.moveInput = glm::vec2(0);
-            glm::vec2 toPlayer = sceneGraph.getWorldTransform(player).position - sceneGraph.getWorldTransform(index).position;
-            if (glm::dot(toPlayer, toPlayer) < 25.0f)
+            if (target != 0 && toPlayerDistance < 25.0f)
             {
                 enemy.state = Enemy::State::Hunting;
             }
@@ -1128,6 +1241,30 @@ int main(int argc, char** argv)
                         nearbyRepelDirection -= 1.0f * toOther / std::max(0.001f, distance2s[i]);
                     }
                     enemy.moveInput = toPlayer + nearbyRepelDirection;
+
+                    if ((toPlayer.x > 0) != enemy.wantToFace)
+                    {
+                        enemy.wantToFace = (toPlayer.x > 0);
+                        enemy.turnDelayTimeAccumulator = 0;
+                    }
+                    else if (enemy.turnDelayTimeAccumulator >= enemy.turnDelayTime)
+                    {
+                        setCharacterFlipHorizontal(index, enemy.wantToFace);
+                    }
+                    else if (enemy.wantToFace != character.flipHorizontal)
+                    {
+                        enemy.turnDelayTimeAccumulator += dt;
+                    }
+
+                    if (glm::dot(toPlayer, toPlayer) <= 1.0)
+                    {
+                        auto& weapon = weapons.get(character.weapon);
+                        if (weapon.state == Weapon::State::Idle && (timerValue - weapon.stateTimer) >= glfwGetTimerFrequency() * enemy.attackRechargeTime)
+                        {
+                            weapon.state = Weapon::State::Swing;
+                            weapon.stateTimer = timerValue;
+                        }
+                    }
                     break;
                 }
                 default:
@@ -1141,18 +1278,25 @@ int main(int argc, char** argv)
             }
             updateVelocity(dynamics.get(index), targetVelocity, 10.0f, dt);
         }
+    }
 
+    void updateDynamics(float dt)
+    {
         for (auto index : dynamics.indices())
         {
             auto& body = dynamics.get(index);
             sceneGraph.setPosition(index, sceneGraph.getLocalTransform(index).position + body.velocity * dt);
             body.velocity -= body.damping * body.velocity * dt;
         }
+    }
 
+    void updateCollision()
+    {
         collisionWorld.update(sceneGraph);
 
         for (const auto& record : collisionWorld.getCollisionRecords())
         {
+            // dynamics stuff
             if (dynamics.has(record.index0) && dynamics.has(record.index1))
             {
                 auto& body0 = dynamics.get(record.index0);
@@ -1179,11 +1323,12 @@ int main(int argc, char** argv)
                 else if (!body0Static)
                 {
                     glm::vec2 impulse = 10.0f * record.depth * record.axis;
-                    std::cout << glm::to_string(impulse) << std::endl;
                     body0.velocity += impulse / body0.mass;
                     body1.velocity -= impulse / body1.mass;
                 }
             }
+
+            // health component stuff
             for (int i = 0; i < 2; ++i)
             {
                 uint32_t active = (i == 0) ? record.index0 : record.index1;
@@ -1192,19 +1337,23 @@ int main(int argc, char** argv)
                 if (weapons.has(active))
                 {
                     const auto& weapon = weapons.get(active);
-                    if (weapon.sharp && weapon.owner != other && healthComponents.has(other))
+                    if (weapon.sharp && hurtboxes.has(other))
                     {
-                        auto& health = healthComponents.get(other);
-                        if (health.state != Health::State::Invincible)
+                        auto& hurtbox = hurtboxes.get(other);
+                        auto& health = healthComponents.get(hurtbox.owner);
+                        if (hurtbox.owner != weapon.owner && health.state != Health::State::Invincible)
                         {
-                            health.value -= 1;
+                            health.value -= hurtbox.multiplier * weapon.damage;
                             health.takingDamage = true;
                         }
                     }
                 }
             }
         }
+    }
 
+    void updateHealth(uint64_t timerValue)
+    {
         died.clear();
         for (auto index : healthComponents.indices())
         {
@@ -1228,30 +1377,205 @@ int main(int argc, char** argv)
                     health.stateTimer = timerValue;
                 }
             }
-            if (drawInstances.has(index))
+            auto& instance = drawInstances.get(health.healthBar);
+            if (health.state == Health::State::Invincible)
             {
-                auto& instance = drawInstances.get(index);
-                if (health.state == Health::State::Invincible)
-                {
-                    instance.color = health.invincibleColor;
-                }
-                else
-                {
-                    instance.color = glm::mix(health.damagedColor, health.healthyColor, health.value / health.max);
-                }
+                instance.color = health.invincibleColor;
             }
+            else
+            {
+                instance.color = glm::mix(health.damagedColor, health.healthyColor, health.value / health.max);
+            }
+            instance.size.x = health.value / health.max;
         }
 
         for (auto index : died)
         {
-            entityManager.destroy(index);
+            sceneGraph.destroyHierarchy(entityManager, index);
         }
+    }
+};
+
+int main(int argc, char** argv)
+{
+    GLFWWrapper glfwWrapper;
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    GLFWwindow* window = createWindow(1920, 1080, "Window");
+    glfwMakeContextCurrent(window);
+
+    if (!gladLoadGL())
+    {
+        throw std::runtime_error("gladLoadGL failed");
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    GLuint shaderProgram = 0;
+    {
+        GLuint vertexShader = loadShader("shaders/vertex.glsl", GL_VERTEX_SHADER);
+        GLuint fragmentShader = loadShader("shaders/fragment.glsl", GL_FRAGMENT_SHADER);
+        shaderProgram = createShaderProgram({ vertexShader, fragmentShader });
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+    }
+
+    glUniformBlockBinding(shaderProgram, glGetUniformBlockIndex(shaderProgram, "TransformData"), 0);
+    glUniformBlockBinding(shaderProgram, glGetUniformBlockIndex(shaderProgram, "MaterialData"), 1);
+
+    glUniform1i(glGetUniformLocation(shaderProgram, "textureSampler"), 0);
+
+    GLuint vertexArray;
+    glGenVertexArrays(1, &vertexArray);
+    glBindVertexArray(vertexArray);
+
+    Renderer renderer;
+    Scene scene;
+
+    float cameraViewHeight = 20.0f;
+    glm::vec2 cameraPosition(0, 0);
+
+    std::vector<GLuint> textures;
+    auto characterTexture = textures.emplace_back(loadTexture("textures/character.png"));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    auto armTexture = textures.emplace_back(loadTexture("textures/arm.png"));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    
+    CharacterDescription playerBodyDescription {};
+    playerBodyDescription.color = { 1.0, 1.0, 1.0, 1.0 };
+    playerBodyDescription.frontShoulderPosition = { .28125, 0.875 };
+    playerBodyDescription.backShoulderPosition = { -0.0625, 0.875 };
+    playerBodyDescription.armDrawSize = { 0.3125, 1.0 };
+    playerBodyDescription.bodyDrawSize = { 1.0, 2.0 };
+    playerBodyDescription.baseSize = { 1.0, 1.0 };
+    playerBodyDescription.armLength = 0.75f;
+    playerBodyDescription.bodyHurtboxPosition = { -0.03125, 0.5 };
+    playerBodyDescription.bodyHurtboxSize = { 0.5, 1.0 };
+    playerBodyDescription.bodyHurtboxMultiplier = 1.0f;
+    playerBodyDescription.headHurtboxPosition = { -0.375, 1.1875};
+    playerBodyDescription.headHurtboxSize = { 0.44, 0.47 };
+    playerBodyDescription.headHurtboxMultiplier = 1.5f;
+    playerBodyDescription.armHurtboxSize = { 0.16, 0.75 };
+    playerBodyDescription.armHurtboxMultiplier = 0.8f;
+    playerBodyDescription.characterTexture = characterTexture;
+    playerBodyDescription.armTexture = armTexture;
+    playerBodyDescription.mass = 15.0f;
+    playerBodyDescription.maxHealth = 20.0f;
+
+    CharacterDescription zombieBodyDescription = playerBodyDescription;
+    zombieBodyDescription.color = { 0.5, 1.0, 0.7, 1.0 };
+    zombieBodyDescription.mass = 10.0f;
+    zombieBodyDescription.maxHealth = 10.0f;
+
+    WeaponAnimation weaponAnimation {};
+    weaponAnimation.poseAngles = { 0.0f, -M_PI_2f, M_PI_4f, 0.0f };
+    weaponAnimation.poseTimes = { 0.0f, 0.1f, 0.2f, 0.45f };
+    weaponAnimation.poseSharp = { false, true, false, false };
+
+    WeaponDescription weaponDescription {};
+    weaponDescription.animation = &weaponAnimation;
+    weaponDescription.damage = 2.0f;
+    weaponDescription.size = { 0.1f, 0.5f };
+    weaponDescription.color = { 0.8, 0.8, 0.8, 1.0 };
+    weaponDescription.texture = 0;
+
+    WeaponAnimation zombieWeaponAnimation {};
+    zombieWeaponAnimation.poseAngles = { -M_PI_2f, -M_PI_2f - M_PI_4f, -M_PI_2f - M_PI_4f, -M_PI_2f + M_PI_4f, -M_PI_2f };
+    zombieWeaponAnimation.poseTimes = { 0.0f, 0.2f, 0.5f, 0.6f, 0.8f };
+    zombieWeaponAnimation.poseSharp = { false, true, true, false, false };
+
+    WeaponDescription zombieWeaponDescription {};
+    zombieWeaponDescription.animation = &zombieWeaponAnimation;
+    zombieWeaponDescription.color = { 0.0f, 0.0f, 0.0f, 0.0f };
+    zombieWeaponDescription.damage = 0.8f;
+    zombieWeaponDescription.size = { 0.15f, 0.15f };
+
+    for (auto i = 0; i < 100; ++i)
+    {
+        auto index = scene.createCharacter(zombieBodyDescription);
+        scene.sceneGraph.setPosition(index, glm::linearRand(glm::vec2(-20), glm::vec2(20)));
+
+        scene.enemies.create(index);
+        Enemy& enemy = scene.enemies.get(index);
+        enemy.speed = 2.0f;
+        enemy.moveInput = glm::vec2(0.0f);
+        enemy.state = Enemy::State::Idle;
+        enemy.attackRechargeTime = 0.5f;
+
+        scene.createWeapon(index, zombieWeaponDescription);
+    }
+
+    {
+        auto index = scene.createCharacter(playerBodyDescription);
+        scene.players.create(index);
+        auto& player = scene.players.get(index);
+        player.acceleration = 25.0f;
+        player.speed = 5.0f;
+        scene.createWeapon(index, weaponDescription);
+    }
+
+    {
+        uint32_t index = scene.createSprite(0, { 0, -5 }, { 3, 2 }, { 0.8, 0.3, 0.2, 1.0 }, 0, false);
+        scene.collisionWorld.create(index);
+        auto& collider = scene.collisionWorld.get(index);
+        collider.halfExtents = { 1.5, 1.0 };
+        scene.dynamics.create(index);
+    }
+
+    uint64_t timerValue = glfwGetTimerValue();
+    uint64_t fpsTimer = timerValue;
+    uint32_t frames = 0;
+
+    std::vector<uint32_t> died;
+
+    while (!glfwWindowShouldClose(window))
+    {
+        glfwPollEvents();
+
+        float dt;
+        {
+            uint64_t previousTimer = timerValue;
+            timerValue = glfwGetTimerValue();
+            dt = static_cast<float>(static_cast<double>(timerValue - previousTimer) / static_cast<double>(glfwGetTimerFrequency()));
+        }
+
+        if (timerValue - fpsTimer >= glfwGetTimerFrequency())
+        {
+            double fps = static_cast<double>(frames * glfwGetTimerFrequency()) / static_cast<double>(timerValue - fpsTimer);
+            std::string windowTitle = "FPS: " + std::to_string(static_cast<int>(fps + 0.5));
+            glfwSetWindowTitle(window, windowTitle.c_str());
+            frames = 0;
+            fpsTimer = timerValue;
+        }
+        ++frames;
+
+        int windowWidth, windowHeight;
+        glfwGetFramebufferSize(window, &windowWidth, &windowHeight);
+
+        glm::mat4 pixelOrtho = glm::ortho<float>(0, windowWidth, 0, windowHeight);
 
         float aspectRatio = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
         glm::vec2 cameraViewHalfExtents(0.5f * aspectRatio * cameraViewHeight, 0.5f * cameraViewHeight);
         glm::mat4 cameraMatrix = glm::ortho(cameraPosition.x - cameraViewHalfExtents.x, cameraPosition.x + cameraViewHalfExtents.x, cameraPosition.y - cameraViewHalfExtents.y, cameraPosition.y + cameraViewHalfExtents.y);
 
-        renderer.prepareRender(sceneGraph, drawInstances, cameraMatrix);
+        glm::mat4 pixelToSceneMatrix = glm::inverse(cameraMatrix) * pixelOrtho;
+
+        double cursorX, cursorY;
+        glfwGetCursorPos(window, &cursorX, &cursorY);
+        glm::vec2 cursorScenePosition = glm::vec2(pixelToSceneMatrix * glm::vec4(cursorX, windowHeight - cursorY, 0, 1));
+        
+        scene.updatePlayer(window, cursorScenePosition, timerValue, dt);
+        scene.updateEnemyAI(timerValue, dt);
+        scene.updateWeapons(timerValue);
+        scene.updateDynamics(dt);
+        scene.updateCollision();
+        scene.updateHealth(timerValue);
+
+        renderer.prepareRender(scene.sceneGraph, scene.drawInstances, cameraMatrix);
 
         glViewport(0, 0, windowWidth, windowHeight);
         glClear(GL_COLOR_BUFFER_BIT);
