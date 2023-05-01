@@ -88,6 +88,23 @@ static void overlayDeliveryItemClickedCallback(uint32_t index, void* data)
     static_cast<TheGame*>(data)->overlayDeliveryItemClicked(index);
 }
 
+static void showDeliveriesOverlayCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->showDeliveryOverlay();
+    static_cast<TheGame*>(data)->closeDepotOverlay();
+}
+
+static void showStoreOverlayCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->showStoreOverlay();
+    static_cast<TheGame*>(data)->closeDepotOverlay();
+}
+
+static void storeOverlayItemClickedCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->storeOverlayItemClicked(index);
+}
+
 Game* createGame()
 {
     return new TheGame();
@@ -105,11 +122,13 @@ TheGame::TheGame() :
 {
     entityManager.addComponentManager(sceneGraph);
     entityManager.addComponentManager(arrows);
+    // entityManager.addComponentManager(behaviors);
     entityManager.addComponentManager(characters);
     entityManager.addComponentManager(closeButtons);
     entityManager.addComponentManager(colliders);
     entityManager.addComponentManager(deliveries);
     entityManager.addComponentManager(addresses);
+    entityManager.addComponentManager(deliveryOverlays);
     entityManager.addComponentManager(depots);
     entityManager.addComponentManager(depotOverlays);
     entityManager.addComponentManager(drawInstances);
@@ -119,6 +138,10 @@ TheGame::TheGame() :
     entityManager.addComponentManager(hurtboxes);
     entityManager.addComponentManager(overlayDeliveryItems);
     entityManager.addComponentManager(players);
+    entityManager.addComponentManager(storeItems);
+    entityManager.addComponentManager(storeOverlays);
+    entityManager.addComponentManager(storeOverlayItems);
+    entityManager.addComponentManager(temporaries);
     entityManager.addComponentManager(textInstances);
     entityManager.addComponentManager(triggers);
     entityManager.addComponentManager(uiElements);
@@ -235,6 +258,32 @@ TheGame::~TheGame()
     for (const auto& texture : textures)
     {
         glDeleteTextures(1, &texture);
+    }
+}
+
+void TheGame::updateTemporaries(float dt)
+{
+    died.clear();
+    for (auto index : temporaries.indices())
+    {
+        auto& temporary = temporaries.get(index);
+        if (temporary.timerValue >= temporary.duration)
+        {
+            died.push_back(index);
+        }
+        temporary.timerValue += dt;
+    }
+
+    for (auto index : died)
+    {
+        if (sceneGraph.has(index))
+        {
+            sceneGraph.destroyHierarchy(entityManager, index);
+        }
+        else
+        {
+            entityManager.destroy(index);
+        }
     }
 }
 
@@ -356,8 +405,11 @@ void TheGame::update(GLFWwindow* window)
     updateWeapons(dt);
     physicsWorld.update(dt);
     updateHealth(dt);
-    updateDepotOverlay();
+    updateDeliveryOverlay();
+    // updateStoreOverlay();
+    updateStoreOverlayItems();
     updateUI();
+    updateTemporaries(dt);
 }
 
 void TheGame::draw()
@@ -1065,7 +1117,7 @@ void TheGame::updateHoveredUIElement(const glm::vec2& cursorUIPosition)
     }
 }
 
-void TheGame::updateDepotOverlay()
+void TheGame::updateDeliveryOverlay()
 {
     if (players.indices().empty())
     {
@@ -1074,9 +1126,9 @@ void TheGame::updateDepotOverlay()
     auto& player = players.get(players.indices().front());
     glm::vec2 playerPosition = sceneGraph.getWorldTransform(players.indices().front()).position;
 
-    for (const auto index : depotOverlays.indices())
+    for (const auto index : deliveryOverlays.indices())
     {
-        auto& overlay = depotOverlays.get(index);
+        auto& overlay = deliveryOverlays.get(index);
         uint32_t deliveriesArrayIndex = 0;
         while (overlay.deliveryItems.size() < 3)
         {
@@ -1147,6 +1199,21 @@ void TheGame::updateDepotOverlay()
     }
 }
 
+void TheGame::updateStoreOverlayItems()
+{
+    for (auto index : storeOverlayItems.indices())
+    {
+        auto& overlayItem = storeOverlayItems.get(index);
+        const auto& item = storeItems.get(overlayItem.item);
+        
+        if (overlayItem.lastCost != item.cost)
+        {
+            textInstances.get(overlayItem.costText).text = getMoneyString(item.cost);
+            overlayItem.lastCost = item.cost;
+        }
+    }
+}
+
 void TheGame::onWeaponCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord)
 {
     const auto& weapon = weapons.get(index);
@@ -1171,6 +1238,24 @@ void TheGame::onTriggerCollision(uint32_t index, uint32_t other, const Collision
     }
 }
 
+uint32_t TheGame::createButton(uint32_t overlay, const glm::vec2& size, const glm::vec4& color, float spacing, int index, GenericCallback onClick)
+{
+    auto item = entityManager.create();
+    sceneGraph.create(item, overlay);
+    sceneGraph.setDepth(item, 0.1f);
+    uiElements.create(item);
+    auto& element = uiElements.get(item);
+    element.anchor = UIElement::Position::Top;
+    element.onClick = onClick;
+    element.position = { 0, -spacing - size.y / 2 - index * (spacing + size.y) };
+    drawInstances.create(item);
+    auto& instance = drawInstances.get(item);
+    instance.size = size;
+    instance.color = color;
+    instance.layer = 1;
+    return item;
+}
+
 void TheGame::onTriggerDepotOverlay()
 {
     if (depotOverlays.indices().empty())
@@ -1178,6 +1263,75 @@ void TheGame::onTriggerDepotOverlay()
         auto overlay = createOverlay({ 0, 0 }, { 8, 5 }, 0 );
         depotOverlays.create(overlay);
         createText(overlay, "Depot", { 0.1f, -0.1f }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::UpperLeft, UIElement::Position::UpperLeft);
+
+        auto deliveriesButton = createButton(overlay, { 5, 1 }, { 0.8, 0.8, 0.8, 1.0 }, 0.5, 0, showDeliveriesOverlayCallback);
+        createText(deliveriesButton, "Deliveries", { 0, 0 }, { 0.25f, 0.5f }, { 0, 0, 0, 1 });
+
+        auto storeButton = createButton(overlay, { 5, 1 }, { 0.8, 0.8, 0.8, 1.0 }, 0.5, 1, showStoreOverlayCallback);
+        createText(storeButton, "Store", { 0, 0 }, { 0.25f, 0.5f }, { 0, 0, 0, 1 });
+    }
+}
+
+void TheGame::showStoreOverlay()
+{
+    if (storeOverlays.indices().empty())
+    {
+        auto overlay = createOverlay({ 0, 0 }, { 8, 5 }, 0 );
+        storeOverlays.create(overlay);
+        createText(overlay, "Store", { 0.1f, -0.1f }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::UpperLeft, UIElement::Position::UpperLeft);
+
+        // create store items
+        if (storeItems.indices().empty())
+        {
+            auto healthItem = entityManager.create();
+            storeItems.create(healthItem);
+            storeItems.get(healthItem) = StoreItem { StoreItem::StatBoost::HEALTH, 10, 25 };
+            auto speedItem = entityManager.create();
+            storeItems.create(speedItem);
+            storeItems.get(speedItem) = StoreItem { StoreItem::StatBoost::SPEED, 2, 15 };
+            auto attackItem = entityManager.create();
+            storeItems.create(attackItem);
+            storeItems.get(attackItem) = StoreItem { StoreItem::StatBoost::ATTACK, 10, 50 };
+        }
+
+        for (auto i = 0; i < 3; ++i)
+        {
+            auto item = storeItems.indices()[i];
+            uint32_t index;
+            switch (storeItems.get(item).stat)
+            {
+                case StoreItem::StatBoost::HEALTH:
+                    index = createButton(overlay, { 5, 1 }, { 1, 0, 0, 1 }, 0.5, i, storeOverlayItemClickedCallback);
+                    createText(index, "Health", { 0, 0 }, { 0.25f, 0.5f }, { 1, 1, 1, 1 });
+                    break;
+                case StoreItem::StatBoost::SPEED:
+                    index = createButton(overlay, { 5, 1 }, { 0, 0, 1, 1 }, 0.5, 1, storeOverlayItemClickedCallback);
+                    createText(index, "Speed", { 0, 0 }, { 0.25f, 0.5f }, { 1, 1, 1, 1 });
+                    break;
+                case StoreItem::StatBoost::ATTACK:
+                    index = createButton(overlay, { 5, 1 }, { 1, 1, 0, 1 }, 0.5, 2, storeOverlayItemClickedCallback);
+                    createText(index, "Attack", { 0, 0 }, { 0.25f, 0.5f }, { 0, 0, 0, 1 });
+                    break;
+                default:
+                    index = createButton(overlay, { 5, 1 }, { 0.5, 0.5, 0.5, 1 }, 0.5, i, storeOverlayItemClickedCallback);
+                    createText(index, "Unknown", { 0, 0 }, { 0.25f, 0.5f }, { 1, 1, 1, 1 });
+                    break;
+            }
+            storeOverlayItems.create(index);
+            auto& overlayItem = storeOverlayItems.get(index);
+            overlayItem.item = item;
+            overlayItem.costText = createText(index, "", { 0, 0 }, { 0.25, 0.5 }, { 0, 1, 0, 1 }, UIElement::Position::Right, UIElement::Position::Right);
+        }
+    }
+}
+
+void TheGame::showDeliveryOverlay()
+{
+    if (deliveryOverlays.indices().empty())
+    {
+        auto overlay = createOverlay({ 0, 0 }, { 8, 5 }, 0 );
+        deliveryOverlays.create(overlay);
+        createText(overlay, "Deliveries", { 0.1f, -0.1f }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::UpperLeft, UIElement::Position::UpperLeft);
     }
 }
 
@@ -1224,7 +1378,58 @@ void TheGame::overlayDeliveryItemClicked(uint32_t index)
     player.delivery = overlayDeliveryItems.get(index).delivery;
     player.target = deliveries.get(player.delivery).address;
 
-    auto& overlay = depotOverlays.get(sceneGraph.getParent(index));
+    auto& overlay = deliveryOverlays.get(sceneGraph.getParent(index));
     overlay.deliveryItems.erase(std::find(overlay.deliveryItems.begin(), overlay.deliveryItems.end(), index));
     sceneGraph.destroyHierarchy(entityManager, index);
+}
+
+void TheGame::storeOverlayItemClicked(uint32_t index)
+{
+    if (players.indices().empty())
+    {
+        return;
+    }
+
+    auto playerIndex = players.indices().front();
+    auto& player = players.get(playerIndex);
+
+    auto& item = storeItems.get(storeOverlayItems.get(index).item);
+
+    if (player.money < item.cost)
+    {
+        auto text = createText(0, "Insufficient funds", { 0, 1 }, { 0.5f, 1.0f }, { 1, 0, 0, 1 }, UIElement::Position::Bottom, UIElement::Position::Bottom);
+        temporaries.create(text);
+        return;
+    }
+    player.money -= item.cost;
+
+    switch (item.stat)
+    {
+        case StoreItem::StatBoost::HEALTH:
+            healthComponents.get(playerIndex).value += item.boostAmount;
+            break;
+        case StoreItem::StatBoost::ATTACK:
+            weapons.get(characters.get(playerIndex).weapon).damage += item.boostAmount;
+            break;
+        case StoreItem::StatBoost::SPEED:
+            player.speed += item.boostAmount;
+            break;
+        default:
+            std::cout << "scammed" << std::endl;
+            break;
+    }
+
+    // light trolling
+    item.boostAmount *= 1.5f;
+    item.cost *= 1.8f;
+}
+
+void TheGame::closeDepotOverlay()
+{
+    if (depotOverlays.indices().empty())
+    {
+        return;
+    }
+
+    sceneGraph.destroyHierarchy(entityManager, depotOverlays.indices().front());
 }

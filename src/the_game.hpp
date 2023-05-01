@@ -184,20 +184,61 @@ struct OverlayDeliveryItem
     uint32_t delivery;
 };
 
-struct DepotOverlay
+struct DeliveryOverlay
 {
     std::vector<uint32_t> deliveryItems;
+};
+
+struct DepotOverlay
+{
+};
+
+struct StoreItem
+{
+    enum class StatBoost
+    {
+        HEALTH, SPEED, ATTACK
+    };
+    StatBoost stat;
+    float boostAmount;
+    float cost;
+};
+
+struct StoreOverlayItem
+{
+    uint32_t item;
+    uint32_t costText;
+    float lastCost;
+};
+
+struct Temporary
+{
+    float timerValue = 0;
+    float duration = 1.0;
+};
+
+struct Behavior
+{
+    GenericCallback callback;
+    float dt;
+};
+
+struct StoreOverlay
+{
+    std::vector<uint32_t> storeItems;
 };
 
 class TheGame final : public Game
 {
     SceneGraph sceneGraph;
     ComponentManager<Arrow> arrows;
+    // ComponentManager<Behavior> behaviors;
     ComponentManager<Character> characters;
     ComponentManager<CloseButton> closeButtons;
     ComponentManager<Collider> colliders;
     ComponentManager<Delivery> deliveries;
     ComponentManager<DeliveryAddress> addresses;
+    ComponentManager<DeliveryOverlay> deliveryOverlays;
     ComponentManager<Depot> depots;
     ComponentManager<DepotOverlay> depotOverlays;
     ComponentManager<DrawInstance> drawInstances;
@@ -207,6 +248,10 @@ class TheGame final : public Game
     ComponentManager<Hurtbox> hurtboxes;
     ComponentManager<OverlayDeliveryItem> overlayDeliveryItems;
     ComponentManager<Player> players;
+    ComponentManager<StoreItem> storeItems;
+    ComponentManager<StoreOverlay> storeOverlays;
+    ComponentManager<StoreOverlayItem> storeOverlayItems;
+    ComponentManager<Temporary> temporaries;
     ComponentManager<TextInstance> textInstances;
     ComponentManager<Trigger> triggers;
     ComponentManager<UIElement> uiElements;
@@ -257,6 +302,7 @@ public:
     uint32_t createZombie(const glm::vec2& position);
     uint32_t createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture);
     uint32_t createText(uint32_t parent, const std::string& text, const glm::vec2& position, const glm::vec2& scale, const glm::vec4& color, UIElement::Position alignment = UIElement::Position::Center, UIElement::Position anchor = UIElement::Position::Center);
+    uint32_t createButton(uint32_t overlay, const glm::vec2& size, const glm::vec4& color, float spacing, int index, GenericCallback onClick);
 
     void updateWeapons(float dt);
     void updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosition, float dt);
@@ -264,7 +310,12 @@ public:
     void updateHealth(float dt);
     void updateUI();
     void updateHoveredUIElement(const glm::vec2& cursorUIPosition);
-    void updateDepotOverlay();
+    // void updateDepotOverlay();
+    void updateDeliveryOverlay();
+    // void updateStoreOverlay();
+    void updateStoreOverlayItems();
+    // void updateBehaviors(float dt);
+    void updateTemporaries(float dt);
 
     void setCharacterFlipHorizontal(uint32_t index, bool flipHorizontal);
     void onWeaponCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord);
@@ -275,4 +326,8 @@ public:
     void completeDelivery();
     void closeButtonClicked(uint32_t index);
     void overlayDeliveryItemClicked(uint32_t index);
+    void storeOverlayItemClicked(uint32_t index);
+    void showStoreOverlay();
+    void showDeliveryOverlay();
+    void closeDepotOverlay();
 };
