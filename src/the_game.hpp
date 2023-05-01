@@ -6,7 +6,8 @@
 #include "physics_world.hpp"
 #include "renderer.hpp"
 
-using GenericCallback = void (*) (void*, uint32_t);
+using GenericCallback = void (*) (uint32_t, void*);
+using ConditionCallback = bool (*) (uint32_t, void*);
 
 struct WeaponAnimation
 {
@@ -67,7 +68,7 @@ struct Weapon
     uint32_t owner;
     uint32_t armPivot;
     State state;
-    uint64_t stateTimer;
+    float stateTimer;
     bool sharp;
     float damage;
     bool flipHorizontal;
@@ -93,6 +94,9 @@ struct Player
 {
     float speed;
     float acceleration;
+    uint32_t delivery = 0;
+    uint32_t target = 0;
+    uint32_t arrow = 0;
 };
 
 struct Health
@@ -107,7 +111,8 @@ struct Health
     glm::vec4 damagedColor;
     glm::vec4 invincibleColor;
     State state;
-    uint64_t stateTimer;
+    float stateTimer;
+    float invincibleTime = 1.0f;
     bool takingDamage;
     uint32_t healthBar;
     GenericCallback onDied;
@@ -122,23 +127,55 @@ struct Hurtbox
 struct Trigger
 {
     bool active = false;
+    bool triggered = false;
     int key;
-    GenericCallback callback;
+    GenericCallback callback = nullptr;
+    ConditionCallback condition = nullptr;
+};
+
+struct UIElement
+{
+    GenericCallback onClick;
+};
+
+struct Delivery
+{
+    uint32_t address;
+    float value;
+};
+
+struct DeliveryAddress
+{
+};
+
+struct Depot
+{
+};
+
+struct Arrow
+{
+    uint32_t source;
+    uint32_t target;
 };
 
 class TheGame final : public Game
 {
     SceneGraph sceneGraph;
-    ComponentManager<Enemy> enemies;
+    ComponentManager<Arrow> arrows;
     ComponentManager<Character> characters;
-    ComponentManager<Weapon> weapons;
+    ComponentManager<Collider> colliders;
+    ComponentManager<Delivery> deliveries;
+    ComponentManager<DeliveryAddress> addresses;
+    ComponentManager<Depot> depots;
+    ComponentManager<DrawInstance> drawInstances;
+    ComponentManager<Dynamic> dynamics;
+    ComponentManager<Enemy> enemies;
     ComponentManager<Health> healthComponents;
     ComponentManager<Hurtbox> hurtboxes;
-    ComponentManager<DrawInstance> drawInstances;
-    ComponentManager<Collider> colliders;
-    ComponentManager<Dynamic> dynamics;
     ComponentManager<Player> players;
+    ComponentManager<TextInstance> textInstances;
     ComponentManager<Trigger> triggers;
+    ComponentManager<Weapon> weapons;
     EntityManager entityManager;
     Renderer renderer;
     PhysicsWorld physicsWorld;
@@ -150,7 +187,6 @@ class TheGame final : public Game
     WeaponDescription weaponDescription;
     WeaponDescription zombieWeaponDescription;
     std::vector<uint32_t> died;
-    bool playerDied = false;
     glm::vec2 cameraPosition;
     float cameraViewHeight;
     float uiViewHeight;
@@ -161,6 +197,7 @@ class TheGame final : public Game
     uint64_t timerValue;
     uint64_t fpsTimer;
     uint32_t frames;
+    GLuint arrowTexture;
 
 public:
     TheGame();
@@ -173,15 +210,22 @@ public:
     uint32_t createSprite(uint32_t parent, const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, GLuint texture, bool flipHorizontal = false, float heightForDepth = 0);
     uint32_t createHurtbox(uint32_t parent, uint32_t owner, const glm::vec2& position, const glm::vec2& size, float multiplier);
     uint32_t createWeapon(uint32_t owner, const WeaponDescription& description);
-    uint32_t createCharacter(const CharacterDescription& description);
-    uint32_t createTrigger(uint32_t parent, const glm::vec2& position, const glm::vec2& size, int key, GenericCallback callback);
+    uint32_t createCharacter(const glm::vec2& position, const CharacterDescription& description);
+    uint32_t createTrigger(uint32_t parent, const glm::vec2& position, const glm::vec2& size, int key, GenericCallback callback, ConditionCallback condition = nullptr);
+    uint32_t createPlayer(const glm::vec2& position);
+    uint32_t createZombie(const glm::vec2& position);
+    uint32_t createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture);
 
-    void updateWeapons(uint64_t timerValue);
-    void updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosition, uint64_t timerValue, float dt);
-    void updateEnemyAI(uint64_t timerValue, float dt);
-    void updateHealth(uint64_t timerValue);
+    void updateWeapons(float dt);
+    void updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosition, float dt);
+    void updateEnemyAI(float dt);
+    void updateHealth(float dt);
 
     void setCharacterFlipHorizontal(uint32_t index, bool flipHorizontal);
     void onWeaponCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord);
     void onTriggerCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord);
+    void onTriggerDepotOverlay();
+    void onPlayerDied();
+    bool hasDeliveryForAddress(uint32_t address);
+    void completeDelivery();
 };

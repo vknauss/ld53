@@ -1,9 +1,11 @@
 #include "the_game.hpp"
 
+#include <iostream>
 #include <string>
 #include <GLFW/glfw3.h>
 #include <glm/gtc/random.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+// #include <glm/gtx/string_cast.hpp>
 
 #include "opengl_utils.hpp"
 
@@ -23,16 +25,24 @@ static void updateVelocity(Dynamic& body, const glm::vec2& targetVelocity, float
     }
 }
 
-static glm::mat4 computeViewMatrix(int windowWidth, int windowHeight, float pixelsPerWorldUnit, float targetViewableHeight, const glm::vec2& viewCenter)
+static void computeViewExtents(int windowWidth, int windowHeight, float pixelsPerWorldUnit, float targetViewableHeight, const glm::vec2& viewCenter, glm::vec2& minExtents, glm::vec2& maxExtents)
 {
     float baseWorldUnitsPerHeight = static_cast<float>(windowHeight) / pixelsPerWorldUnit;
     float pixelScale = std::ceil(baseWorldUnitsPerHeight / targetViewableHeight);
     float actualViewHeight = baseWorldUnitsPerHeight / pixelScale;
     float aspectRatio = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
-    glm::vec2 viewHalfExtents(0.5f * aspectRatio * actualViewHeight, 0.5f * actualViewHeight);
-
-    return glm::ortho(viewCenter.x - viewHalfExtents.x, viewCenter.x + viewHalfExtents.x, viewCenter.y - viewHalfExtents.y, viewCenter.y + viewHalfExtents.y);
+    maxExtents = { 0.5f * aspectRatio * actualViewHeight, 0.5f * actualViewHeight };
+    minExtents = viewCenter - maxExtents;
+    maxExtents = viewCenter + maxExtents;
 }
+
+static glm::mat4 computeViewMatrix(int windowWidth, int windowHeight, float pixelsPerWorldUnit, float targetViewableHeight, const glm::vec2& viewCenter)
+{
+    glm::vec2 minExtents, maxExtents;
+    computeViewExtents(windowWidth, windowHeight, pixelsPerWorldUnit, targetViewableHeight, viewCenter, minExtents, maxExtents);
+    return glm::ortho(minExtents.x, maxExtents.x, minExtents.y, maxExtents.y);
+}
+
 
 static void weaponCollisionCallback(uint32_t index, uint32_t other, const CollisionRecord& record, void* data)
 {
@@ -44,12 +54,33 @@ static void triggerCollisionCallback(uint32_t index, uint32_t other, const Colli
     static_cast<TheGame*>(data)->onTriggerCollision(index, other, record);
 }
 
+static void depotOverlayTriggerCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->onTriggerDepotOverlay();
+}
+
+static void deliveryAddressTriggerCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->completeDelivery();
+}
+
+static bool deliveryAddressTriggerCondition(uint32_t index, void* data)
+{
+    return static_cast<TheGame*>(data)->hasDeliveryForAddress(index);
+}
+
+static void playerDiedCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->onPlayerDied();
+}
+
 Game* createGame()
 {
     return new TheGame();
 }
 
 TheGame::TheGame() :
+    renderer(sceneGraph, drawInstances, textInstances),
     physicsWorld(sceneGraph, colliders, dynamics),
     cameraPosition(0, 0),
     cameraViewHeight(20.0f),
@@ -59,15 +90,21 @@ TheGame::TheGame() :
     frames(0)
 {
     entityManager.addComponentManager(sceneGraph);
-    entityManager.addComponentManager(colliders);
-    entityManager.addComponentManager(enemies);
-    entityManager.addComponentManager(drawInstances);
+    entityManager.addComponentManager(arrows);
     entityManager.addComponentManager(characters);
-    entityManager.addComponentManager(weapons);
-    entityManager.addComponentManager(healthComponents);
+    entityManager.addComponentManager(colliders);
+    entityManager.addComponentManager(deliveries);
+    entityManager.addComponentManager(addresses);
+    entityManager.addComponentManager(depots);
+    entityManager.addComponentManager(drawInstances);
     entityManager.addComponentManager(dynamics);
+    entityManager.addComponentManager(enemies);
+    entityManager.addComponentManager(healthComponents);
     entityManager.addComponentManager(hurtboxes);
     entityManager.addComponentManager(players);
+    entityManager.addComponentManager(textInstances);
+    entityManager.addComponentManager(triggers);
+    entityManager.addComponentManager(weapons);
 
     auto characterTexture = textures.emplace_back(loadTexture("textures/character.png"));
     auto armTexture = textures.emplace_back(loadTexture("textures/arm.png"));
@@ -76,8 +113,9 @@ TheGame::TheGame() :
     auto roadHorizontalTexture = textures.emplace_back(loadTexture("textures/road_horizontal.png"));
     auto roadVerticalTexture = textures.emplace_back(loadTexture("textures/road_vertical.png"));
     auto depotTexture = textures.emplace_back(loadTexture("textures/depot.png"));
+    arrowTexture = textures.emplace_back(loadTexture("textures/arrow.png"));
 
-    CharacterDescription playerBodyDescription {};
+    playerBodyDescription  = {};
     playerBodyDescription.color = { 1.0, 1.0, 1.0, 1.0 };
     playerBodyDescription.frontShoulderPosition = { .28125, 0.875 };
     playerBodyDescription.backShoulderPosition = { -0.0625, 0.875 };
@@ -98,7 +136,7 @@ TheGame::TheGame() :
     playerBodyDescription.mass = 15.0f;
     playerBodyDescription.maxHealth = 20.0f;
 
-    CharacterDescription zombieBodyDescription = playerBodyDescription;
+    zombieBodyDescription = playerBodyDescription;
     zombieBodyDescription.color = { 0.5, 1.0, 0.7, 1.0 };
     zombieBodyDescription.mass = 10.0f;
     zombieBodyDescription.maxHealth = 10.0f;
@@ -148,6 +186,8 @@ TheGame::TheGame() :
                 collider.halfExtents = { 5.0, 3.25 };
                 dynamics.create(index);
                 createSprite(index, { 0, 1.25 }, { 12, 11 }, { 1.0, 1.0, 1.0, 1.0 }, houseTexture, false);
+                auto address = createTrigger(index, { -0.5, -3.75 }, { 1, 1 }, GLFW_KEY_E, deliveryAddressTriggerCallback, deliveryAddressTriggerCondition);
+                addresses.create(address);
 
                 createSprite(0, { offset.x - 4, offset.y }, { 4, 5 }, { 1, 1, 1, 1 }, roadHorizontalTexture, false, -5);
                 createSprite(0, { offset.x, offset.y }, { 4, 5 }, { 1, 1, 1, 1 }, roadHorizontalTexture, false, -5);
@@ -156,37 +196,23 @@ TheGame::TheGame() :
         }
     }
 
-    for (auto i = 0; i < 100; ++i)
-    {
-        auto index = createCharacter(zombieBodyDescription);
-        sceneGraph.setPosition(index, glm::linearRand(glm::vec2(-20), glm::vec2(20)));
+    auto depotTrigger = createTrigger(0, {-5, -5}, { 1, 1 }, GLFW_KEY_E, depotOverlayTriggerCallback);
+    depots.create(depotTrigger);
+    createSprite(depotTrigger, { 0, 0 }, { 1, 1 }, { 1, 0, 0, 1 }, 0);
 
-        enemies.create(index);
-        Enemy& enemy = enemies.get(index);
-        enemy.speed = 2.0f;
-        enemy.moveInput = glm::vec2(0.0f);
-        enemy.state = Enemy::State::Idle;
-        enemy.attackRechargeTime = 0.5f;
+    createPlayer({ 0, 0 });
 
-        createWeapon(index, zombieWeaponDescription);
-    }
-
-    {
-        auto index = createCharacter(playerBodyDescription);
-        players.create(index);
-        auto& player = players.get(index);
-        player.acceleration = 25.0f;
-        player.speed = 5.0f;
-        createWeapon(index, weaponDescription);
-    }
-
-    {
-        uint32_t index = createSprite(0, { 0, -5 }, { 3, 2 }, { 0.8, 0.3, 0.2, 1.0 }, 0, false);
-        colliders.create(index);
-        auto& collider = colliders.get(index);
-        collider.halfExtents = { 1.5, 1.0 };
-        dynamics.create(index);
-    }
+    auto testText = entityManager.create();
+    sceneGraph.create(testText);
+    textInstances.create(testText);
+    auto& textInstance = textInstances.get(testText);
+    textInstance.text = "Hello World";
+    drawInstances.create(testText);
+    auto& drawInstance = drawInstances.get(testText);
+    drawInstance.isText = true;
+    drawInstance.layer = 1;
+    drawInstance.size = { 0.5, 1 };
+    drawInstance.color = { 1, 0, 0, 1 };
 }
 
 TheGame::~TheGame()
@@ -196,7 +222,6 @@ TheGame::~TheGame()
         glDeleteTextures(1, &texture);
     }
 }
-
 
 void TheGame::update(GLFWwindow* window)
 {
@@ -220,36 +245,101 @@ void TheGame::update(GLFWwindow* window)
     glfwGetFramebufferSize(window, &windowWidth, &windowHeight);
     glm::mat4 pixelOrtho = glm::ortho<float>(0, windowWidth, 0, windowHeight);
 
-    cameraMatrix = computeViewMatrix(windowWidth, windowHeight, PIXELS_PER_WORLD_UNIT, cameraViewHeight, cameraPosition);
-    uiCameraMatrix = computeViewMatrix(windowWidth, windowHeight, PIXELS_PER_WORLD_UNIT, uiViewHeight, { 0, 0});
-
-    glm::mat4 pixelToSceneMatrix = glm::inverse(cameraMatrix) * pixelOrtho;
-
-    double cursorX, cursorY;
-    glfwGetCursorPos(window, &cursorX, &cursorY);
-    glm::vec2 cursorScenePosition = glm::vec2(pixelToSceneMatrix * glm::vec4(cursorX, windowHeight - cursorY, 0, 1));
-
-    for (auto index : triggers.indices())
-    {
-        triggers.get(index).active = false;
-    }
-    
-    updatePlayer(window, cursorScenePosition, timerValue, dt);
-    updateEnemyAI(timerValue, dt);
-    updateWeapons(timerValue);
-    physicsWorld.update(dt);
-    updateHealth(timerValue);
-
-    if (!playerDied)
+    if (!players.indices().empty())
     {
         glm::vec2 cameraToPlayer = sceneGraph.getWorldTransform(players.indices().front()).position - cameraPosition;
         cameraPosition += dt * cameraToPlayer;
     }
+
+    glm::vec2 sceneViewMinExtents, sceneViewMaxExtents;
+    computeViewExtents(windowWidth, windowHeight, PIXELS_PER_WORLD_UNIT, cameraViewHeight, cameraPosition, sceneViewMinExtents, sceneViewMaxExtents);
+    cameraMatrix = glm::ortho(sceneViewMinExtents.x, sceneViewMaxExtents.x, sceneViewMinExtents.y, sceneViewMaxExtents.y);
+
+    uiCameraMatrix = computeViewMatrix(windowWidth, windowHeight, PIXELS_PER_WORLD_UNIT, uiViewHeight, { 0, 0});
+
+    double cursorX, cursorY;
+    glfwGetCursorPos(window, &cursorX, &cursorY);
+    glm::vec4 cursorNDCPosition = pixelOrtho * glm::vec4(cursorX, windowHeight - cursorY, 0, 1);
+    glm::vec2 cursorScenePosition = glm::vec2(glm::inverse(cameraMatrix) * cursorNDCPosition);
+    glm::vec2 cursorUIPosition = glm::vec2(glm::inverse(uiCameraMatrix) * cursorNDCPosition);
+
+    for (auto index : triggers.indices())
+    {
+        auto& trigger = triggers.get(index);
+        if (trigger.active && glfwGetKey(window, trigger.key))
+        {
+            if (!trigger.triggered)
+            {
+                trigger.callback(index, this);
+                trigger.triggered = true;
+            }
+        }
+        else
+        {
+            trigger.triggered = false;
+        }
+        triggers.get(index).active = false;
+    }
+
+    if (enemies.indices().size() < 100)
+    {
+        // fixed aspect means visible pop-in likely on ultrawide, but fair
+        glm::vec2 offset = glm::circularRand(0.5f * cameraViewHeight * 16.0f / 9.0f + glm::linearRand(0.0f, 10.0f));
+        createZombie(cameraPosition + offset);
+    }
+
+    if (!players.indices().empty())
+    {
+        auto index = players.indices().front();
+        auto& player = players.get(index);
+        if (player.target)
+        {
+            if (!arrows.has(player.arrow))
+            {
+                player.arrow = entityManager.create();
+                sceneGraph.create(player.arrow, index);
+                sceneGraph.setDepth(player.arrow, -0.2f);
+                arrows.create(player.arrow);
+                auto& arrow = arrows.get(player.arrow);
+                arrow.source = index;
+                arrow.target = player.target;
+                drawInstances.create(player.arrow);
+                auto& instance = drawInstances.get(player.arrow);
+                instance.texture = arrowTexture;
+                instance.size = { 1, 0.5 };
+            }
+            else
+            {
+                arrows.get(player.arrow).target = player.target;
+            }
+        }
+        else if (arrows.has(player.arrow))
+        {
+            entityManager.destroy(player.arrow);
+            player.arrow = 0;
+        }
+    }
+
+    for (auto index : arrows.indices())
+    {
+        const auto& arrow = arrows.get(index);
+        glm::vec2 direction = sceneGraph.getWorldTransform(arrow.target).position - sceneGraph.getWorldTransform(arrow.source).position;
+        if (glm::dot(direction, direction) > 0.0001)
+        {
+            sceneGraph.setRotation(index, std::atan2(direction.y, direction.x));
+        }
+    }
+    
+    updatePlayer(window, cursorScenePosition, dt);
+    updateEnemyAI(dt);
+    updateWeapons(dt);
+    physicsWorld.update(dt);
+    updateHealth(dt);
 }
 
 void TheGame::draw()
 {
-    renderer.prepareRender(sceneGraph, drawInstances,  { cameraMatrix, uiCameraMatrix });
+    renderer.prepareRender({ cameraMatrix, uiCameraMatrix });
     renderer.render(windowWidth, windowHeight, { 0.1, 0.5, 0.1, 1.0} );
 }
 
@@ -301,11 +391,11 @@ void TheGame::addHealthComponent(uint32_t index, float maxHealth, GenericCallbac
     health.onDied = onDied;
     health.healthBar = entityManager.create();
     sceneGraph.create(health.healthBar, index);
-    sceneGraph.setPosition(health.healthBar, { 0, -1 });
+    sceneGraph.setPosition(health.healthBar, { 0, -0.65f });
     drawInstances.create(health.healthBar);
     auto& instance = drawInstances.get(health.healthBar);
     instance.color = health.healthyColor;
-    instance.size = { 1.0, 0.25f };
+    instance.size = { 1.0, 0.1f };
 }
 
 uint32_t TheGame::createSprite(uint32_t parent, const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, GLuint texture, bool flipHorizontal, float heightForDepth)
@@ -365,10 +455,11 @@ uint32_t TheGame::createWeapon(uint32_t owner, const WeaponDescription& descript
     return index;
 }
 
-uint32_t TheGame::createCharacter(const CharacterDescription& description)
+uint32_t TheGame::createCharacter(const glm::vec2& position, const CharacterDescription& description)
 {
     uint32_t index = entityManager.create();
     sceneGraph.create(index);
+    sceneGraph.setPosition(index, position);
 
     colliders.create(index);
     auto& collider = colliders.get(index);
@@ -416,42 +507,89 @@ uint32_t TheGame::createCharacter(const CharacterDescription& description)
     return index;
 }
 
-uint32_t TheGame::createTrigger(uint32_t parent, const glm::vec2& position, const glm::vec2& size, int key, GenericCallback callback)
+uint32_t TheGame::createTrigger(uint32_t parent, const glm::vec2& position, const glm::vec2& size, int key, GenericCallback callback, ConditionCallback condition)
 {
     auto index = entityManager.create();
     sceneGraph.create(index, parent);
     sceneGraph.setPosition(index, position);
+
     colliders.create(index);
     auto& collider = colliders.get(index);
     collider.halfExtents = 0.5f * size;
     collider.callback = triggerCollisionCallback;
     collider.callbackData = this;
+
     triggers.create(index);
     auto& trigger = triggers.get(index);
     trigger.active = false;
     trigger.key = key;
     trigger.callback = callback;
+    trigger.condition = condition;
+
     return index;
 }
 
-void TheGame::updateWeapons(uint64_t timerValue)
+uint32_t TheGame::createPlayer(const glm::vec2& position)
+{
+    auto index = createCharacter(position, playerBodyDescription);
+    players.create(index);
+    auto& player = players.get(index);
+    player.acceleration = 25.0f;
+    player.speed = 5.0f;
+    player.target = depots.indices().front();
+    createWeapon(index, weaponDescription);
+    healthComponents.get(index).onDied = playerDiedCallback;
+
+    return index;
+}
+
+uint32_t TheGame::createZombie(const glm::vec2& position)
+{
+    auto index = createCharacter(position, zombieBodyDescription);
+    enemies.create(index);
+    Enemy& enemy = enemies.get(index);
+    enemy.speed = 2.0f;
+    enemy.moveInput = glm::vec2(0.0f);
+    enemy.state = Enemy::State::Idle;
+    enemy.attackRechargeTime = 0.5f;
+    createWeapon(index, zombieWeaponDescription);
+
+    return index;
+}
+
+uint32_t TheGame::createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture)
+{
+    auto index = entityManager.create();
+    sceneGraph.create(index);
+    sceneGraph.setPosition(index, position);
+
+    drawInstances.create(index);
+    auto& instance = drawInstances.get(index);
+    instance.layer = 1;
+    instance.size = size;
+    instance.texture = texture;
+
+    return index;
+}
+
+void TheGame::updateWeapons(float dt)
 {
     for (auto index : weapons.indices())
     {
         auto& weapon = weapons.get(index);
-        float stateTime = static_cast<float>(static_cast<double>(timerValue - weapon.stateTimer) / static_cast<double>(glfwGetTimerFrequency()));
+        weapon.stateTimer += dt;
         if (weapon.state == Weapon::State::Swing)
         {
             uint32_t poseIndex = 1;
             const auto& animation = *weapon.animation;
-            for (; poseIndex < animation.poseTimes.size() && stateTime > animation.poseTimes[poseIndex]; ++poseIndex);
+            for (; poseIndex < animation.poseTimes.size() && weapon.stateTimer > animation.poseTimes[poseIndex]; ++poseIndex);
             if (poseIndex < animation.poseTimes.size())
             {
                 float angle0 = animation.poseAngles[poseIndex - 1];
                 float angleSpan = animation.poseAngles[poseIndex] - angle0;
                 float time0 = animation.poseTimes[poseIndex - 1];
                 float timeSpan = animation.poseTimes[poseIndex] - time0;
-                float angle = angle0 + angleSpan * (stateTime - time0) / timeSpan;
+                float angle = angle0 + angleSpan * (weapon.stateTimer - time0) / timeSpan;
                 weapon.sharp = animation.poseSharp[poseIndex - 1];
 
                 sceneGraph.setRotation(weapon.armPivot, weapon.flipHorizontal ? -angle : angle);
@@ -465,7 +603,7 @@ void TheGame::updateWeapons(uint64_t timerValue)
     }
 }
 
-void TheGame::updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosition, uint64_t timerValue, float dt)
+void TheGame::updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosition, float dt)
 {
     for (auto index : players.indices())
     {
@@ -511,13 +649,13 @@ void TheGame::updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosit
             if (weapon.state == Weapon::State::Idle)
             {
                 weapon.state = Weapon::State::Swing;
-                weapon.stateTimer = timerValue;
+                weapon.stateTimer = 0;
             }
         }
     }
 }
 
-void TheGame::updateEnemyAI(uint64_t timerValue, float dt)
+void TheGame::updateEnemyAI(float dt)
 {
     for (auto index : enemies.indices())
     {
@@ -617,10 +755,10 @@ void TheGame::updateEnemyAI(uint64_t timerValue, float dt)
                 if (glm::dot(toPlayer, toPlayer) <= 1.0)
                 {
                     auto& weapon = weapons.get(character.weapon);
-                    if (weapon.state == Weapon::State::Idle && (timerValue - weapon.stateTimer) >= glfwGetTimerFrequency() * enemy.attackRechargeTime)
+                    if (weapon.state == Weapon::State::Idle && weapon.stateTimer >= enemy.attackRechargeTime)
                     {
                         weapon.state = Weapon::State::Swing;
-                        weapon.stateTimer = timerValue;
+                        weapon.stateTimer = 0;
                     }
                 }
                 break;
@@ -638,12 +776,13 @@ void TheGame::updateEnemyAI(uint64_t timerValue, float dt)
     }
 }
 
-void TheGame::updateHealth(uint64_t timerValue)
+void TheGame::updateHealth(float dt)
 {
     died.clear();
     for (auto index : healthComponents.indices())
     {
         auto& health = healthComponents.get(index);
+        health.stateTimer += dt;
         if (health.value <= 0)
         {
             died.push_back(index);
@@ -652,15 +791,15 @@ void TheGame::updateHealth(uint64_t timerValue)
         if (health.takingDamage)
         {
             health.state = Health::State::Invincible;
-            health.stateTimer = timerValue;
+            health.stateTimer = 0;
             health.takingDamage = false;
         }
         if (health.state == Health::State::Invincible)
         {
-            if (timerValue - health.stateTimer >= glfwGetTimerFrequency())
+            if (health.stateTimer >= health.invincibleTime)
             {
                 health.state = Health::State::Normal;
-                health.stateTimer = timerValue;
+                health.stateTimer = 0;
             }
         }
         auto& instance = drawInstances.get(health.healthBar);
@@ -680,7 +819,7 @@ void TheGame::updateHealth(uint64_t timerValue)
         auto& health = healthComponents.get(index);
         if (health.onDied)
         {
-            health.onDied(this, index);
+            health.onDied(index, this);
         }
         sceneGraph.destroyHierarchy(entityManager, index);
     }
@@ -705,6 +844,53 @@ void TheGame::onTriggerCollision(uint32_t index, uint32_t other, const Collision
 {
     if (players.has(other))
     {
-        triggers.get(index).active = true;
+        auto& trigger = triggers.get(index);
+        trigger.active = !trigger.condition || trigger.condition(index, this);
     }
+}
+
+void TheGame::onTriggerDepotOverlay()
+{
+    // std::cout << "show depot overlay" << std::endl;
+    // createOverlay({ 0, 0 }, { 8, 5 }, 0 );
+    if (players.indices().empty())
+    {
+        return;
+    }
+    auto& player = players.get(players.indices().front());
+    if (!deliveries.has(player.delivery) && !addresses.indices().empty())
+    {
+        std::cout << "giving delivery" << std::endl;
+        player.delivery = entityManager.create();
+        deliveries.create(player.delivery);
+        auto& delivery = deliveries.get(player.delivery);
+        delivery.address = addresses.indices()[rand() % addresses.indices().size()];
+        delivery.value = glm::linearRand(3.0f, 15.0f);
+        player.target = delivery.address;
+    }
+}
+
+void TheGame::onPlayerDied()
+{
+    // consider doing something here...
+    std::cout << "YOU DIED" << std::endl;
+}
+
+bool TheGame::hasDeliveryForAddress(uint32_t address)
+{
+    if (players.all().empty() || !deliveries.has(players.all().front().delivery))
+    {
+        return false;
+    }
+
+    return deliveries.get(players.all().front().delivery).address == address;
+}
+
+void TheGame::completeDelivery()
+{
+    std::cout << "delivery complete" << std::endl;
+    auto& player = players.get(players.indices().front());
+    entityManager.destroy(player.delivery);
+    player.delivery = 0;
+    player.target = depots.indices().front();
 }

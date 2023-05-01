@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -22,6 +23,7 @@ struct DrawInstance
     GLuint texture = 0;
     bool flipHorizontal = false;
     uint32_t layer = 0;
+    bool isText = false;
 };
 
 struct DrawBatch
@@ -32,6 +34,30 @@ struct DrawBatch
     uint32_t layer = 0;
     UniformBufferInfo transformBufferInfo;
     UniformBufferInfo materialBufferInfo;
+    GLuint vertexArray = 0;
+    GLuint shaderProgram = 0;
+    GLint firstIndex = 0;
+    GLint count = 0;
+};
+
+struct TextInstance
+{
+    std::string text;
+};
+
+struct TextRenderData
+{
+    GLuint vertexArray;
+    uint32_t count;
+};
+
+struct TextBufferInfo
+{
+    GLuint vertexBuffer = 0;
+    GLuint vertexArray = 0;
+    uintptr_t offset = 0;
+    size_t size = 0;
+    uint32_t currentIndex = 0;
 };
 
 class UniformBufferManager
@@ -54,6 +80,23 @@ public:
     void uploadData(const void* data, size_t size, size_t offset = 0);
 };
 
+class TextBufferManager
+{
+    std::vector<TextBufferInfo> bufferInfos;
+    std::vector<uint32_t> inUseBuffers[2];
+    std::vector<uint32_t> freeBuffers;
+    int frameIndex = 0;
+    uint32_t currentBuffer = 0;
+    void* mappedPointer = nullptr;
+
+public:
+    virtual ~TextBufferManager();
+
+    void beginFrameUpload();
+    void endFrameUpload();
+    void uploadData(const std::string& text, DrawBatch& batch);
+};
+
 class TransformBufferManager : public UniformBufferManager
 {
 public:
@@ -68,17 +111,24 @@ public:
 
 class Renderer
 {
+    SceneGraph& sceneGraph;
+    const ComponentManager<DrawInstance>& drawInstances;
+    const ComponentManager<TextInstance>& textInstances;
     TransformBufferManager transformBufferManager;
     MaterialBufferManager materialBufferManager;
+    TextBufferManager textBufferManager;
     std::vector<DrawBatch> batches;
+    std::vector<TextRenderData> textRenderData;
     std::vector<uint32_t> sortIndices;
     GLuint shaderProgram;
+    GLuint textProgram;
     GLuint vertexArray;
+    GLuint fontTexture;
 
 public:
-    Renderer();
+    Renderer(SceneGraph& sceneGraph, const ComponentManager<DrawInstance>& drawInstances, const ComponentManager<TextInstance>& textInstances);
     ~Renderer();
 
-    void prepareRender(SceneGraph& sceneGraph, const ComponentManager<DrawInstance>& drawInstances, const std::vector<glm::mat4>& layerCameras);
+    void prepareRender(const std::vector<glm::mat4>& layerCameras);
     void render(int windowWidth, int windowHeight, const glm::vec4& clearColor);
 };
