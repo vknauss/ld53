@@ -88,6 +88,11 @@ struct Enemy
     float turnDelayTime;
     float turnDelayTimeAccumulator = 0;
     bool wantToFace = false;
+    float despawnTimer = 0;
+    float despawnTime = 10.0f;
+    float noticeDistance = 20.0f;
+    float attackDistance = 2.0f;
+    float despawnDistance = 25.0f;
 };
 
 struct Player
@@ -97,6 +102,8 @@ struct Player
     uint32_t delivery = 0;
     uint32_t target = 0;
     uint32_t arrow = 0;
+    float money = 0;
+    uint32_t moneyText = 0;
 };
 
 struct Health
@@ -131,11 +138,19 @@ struct Trigger
     int key;
     GenericCallback callback = nullptr;
     ConditionCallback condition = nullptr;
+    uint32_t text = 0;
 };
 
 struct UIElement
 {
     GenericCallback onClick;
+    enum class Position
+    {
+        Center, Left, Right, Bottom, Top, LowerLeft, UpperLeft, LowerRight, UpperRight
+    };
+    Position textAlign = Position::Center;
+    Position anchor = Position::Center;
+    glm::vec2 position = { 0.0f, 0.0f }; // base position, scene graph position will be calculated from this
 };
 
 struct Delivery
@@ -144,6 +159,7 @@ struct Delivery
     float value;
 };
 
+// empty struct can be used as a tag
 struct DeliveryAddress
 {
 };
@@ -158,23 +174,42 @@ struct Arrow
     uint32_t target;
 };
 
+struct CloseButton
+{
+    uint32_t overlay;
+};
+
+struct OverlayDeliveryItem
+{
+    uint32_t delivery;
+};
+
+struct DepotOverlay
+{
+    std::vector<uint32_t> deliveryItems;
+};
+
 class TheGame final : public Game
 {
     SceneGraph sceneGraph;
     ComponentManager<Arrow> arrows;
     ComponentManager<Character> characters;
+    ComponentManager<CloseButton> closeButtons;
     ComponentManager<Collider> colliders;
     ComponentManager<Delivery> deliveries;
     ComponentManager<DeliveryAddress> addresses;
     ComponentManager<Depot> depots;
+    ComponentManager<DepotOverlay> depotOverlays;
     ComponentManager<DrawInstance> drawInstances;
     ComponentManager<Dynamic> dynamics;
     ComponentManager<Enemy> enemies;
     ComponentManager<Health> healthComponents;
     ComponentManager<Hurtbox> hurtboxes;
+    ComponentManager<OverlayDeliveryItem> overlayDeliveryItems;
     ComponentManager<Player> players;
     ComponentManager<TextInstance> textInstances;
     ComponentManager<Trigger> triggers;
+    ComponentManager<UIElement> uiElements;
     ComponentManager<Weapon> weapons;
     EntityManager entityManager;
     Renderer renderer;
@@ -192,12 +227,18 @@ class TheGame final : public Game
     float uiViewHeight;
     glm::mat4 cameraMatrix;
     glm::mat4 uiCameraMatrix;
+    glm::vec2 uiViewExtentMin;
+    glm::vec2 uiViewExtentMax;
     int windowWidth;
     int windowHeight;
     uint64_t timerValue;
     uint64_t fpsTimer;
     uint32_t frames;
     GLuint arrowTexture;
+    uint32_t hoveredUIElement = 0;
+    float enemySpawnTimer = 0;
+    GLuint closeButtonTexture;
+    bool mouseButtonDown = false;
 
 public:
     TheGame();
@@ -215,17 +256,23 @@ public:
     uint32_t createPlayer(const glm::vec2& position);
     uint32_t createZombie(const glm::vec2& position);
     uint32_t createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture);
+    uint32_t createText(uint32_t parent, const std::string& text, const glm::vec2& position, const glm::vec2& scale, const glm::vec4& color, UIElement::Position alignment = UIElement::Position::Center, UIElement::Position anchor = UIElement::Position::Center);
 
     void updateWeapons(float dt);
     void updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosition, float dt);
     void updateEnemyAI(float dt);
     void updateHealth(float dt);
+    void updateUI();
+    void updateHoveredUIElement(const glm::vec2& cursorUIPosition);
+    void updateDepotOverlay();
 
     void setCharacterFlipHorizontal(uint32_t index, bool flipHorizontal);
     void onWeaponCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord);
     void onTriggerCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord);
     void onTriggerDepotOverlay();
-    void onPlayerDied();
+    void onPlayerDied(uint32_t index);
     bool hasDeliveryForAddress(uint32_t address);
     void completeDelivery();
+    void closeButtonClicked(uint32_t index);
+    void overlayDeliveryItemClicked(uint32_t index);
 };

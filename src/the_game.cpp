@@ -1,6 +1,9 @@
 #include "the_game.hpp"
 
+#include <algorithm>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <GLFW/glfw3.h>
 #include <glm/gtc/random.hpp>
@@ -36,13 +39,14 @@ static void computeViewExtents(int windowWidth, int windowHeight, float pixelsPe
     maxExtents = viewCenter + maxExtents;
 }
 
-static glm::mat4 computeViewMatrix(int windowWidth, int windowHeight, float pixelsPerWorldUnit, float targetViewableHeight, const glm::vec2& viewCenter)
+static std::string getMoneyString(float amount)
 {
-    glm::vec2 minExtents, maxExtents;
-    computeViewExtents(windowWidth, windowHeight, pixelsPerWorldUnit, targetViewableHeight, viewCenter, minExtents, maxExtents);
-    return glm::ortho(minExtents.x, maxExtents.x, minExtents.y, maxExtents.y);
+    std::stringstream moneyTextStream;
+    float whole;
+    float fraction = std::modf(amount, &whole);
+    moneyTextStream << "$" << static_cast<int>(whole) << "." << std::setw(2) << std::setfill('0') << static_cast<int>(100 * fraction) << std::flush;
+    return moneyTextStream.str();
 }
-
 
 static void weaponCollisionCallback(uint32_t index, uint32_t other, const CollisionRecord& record, void* data)
 {
@@ -71,7 +75,17 @@ static bool deliveryAddressTriggerCondition(uint32_t index, void* data)
 
 static void playerDiedCallback(uint32_t index, void* data)
 {
-    static_cast<TheGame*>(data)->onPlayerDied();
+    static_cast<TheGame*>(data)->onPlayerDied(index);
+}
+
+static void closeButtonClickedCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->closeButtonClicked(index);
+}
+
+static void overlayDeliveryItemClickedCallback(uint32_t index, void* data)
+{
+    static_cast<TheGame*>(data)->overlayDeliveryItemClicked(index);
 }
 
 Game* createGame()
@@ -92,18 +106,22 @@ TheGame::TheGame() :
     entityManager.addComponentManager(sceneGraph);
     entityManager.addComponentManager(arrows);
     entityManager.addComponentManager(characters);
+    entityManager.addComponentManager(closeButtons);
     entityManager.addComponentManager(colliders);
     entityManager.addComponentManager(deliveries);
     entityManager.addComponentManager(addresses);
     entityManager.addComponentManager(depots);
+    entityManager.addComponentManager(depotOverlays);
     entityManager.addComponentManager(drawInstances);
     entityManager.addComponentManager(dynamics);
     entityManager.addComponentManager(enemies);
     entityManager.addComponentManager(healthComponents);
     entityManager.addComponentManager(hurtboxes);
+    entityManager.addComponentManager(overlayDeliveryItems);
     entityManager.addComponentManager(players);
     entityManager.addComponentManager(textInstances);
     entityManager.addComponentManager(triggers);
+    entityManager.addComponentManager(uiElements);
     entityManager.addComponentManager(weapons);
 
     auto characterTexture = textures.emplace_back(loadTexture("textures/character.png"));
@@ -114,6 +132,7 @@ TheGame::TheGame() :
     auto roadVerticalTexture = textures.emplace_back(loadTexture("textures/road_vertical.png"));
     auto depotTexture = textures.emplace_back(loadTexture("textures/depot.png"));
     arrowTexture = textures.emplace_back(loadTexture("textures/arrow.png"));
+    closeButtonTexture = textures.emplace_back(loadTexture("textures/close_button.png"));
 
     playerBodyDescription  = {};
     playerBodyDescription.color = { 1.0, 1.0, 1.0, 1.0 };
@@ -196,23 +215,19 @@ TheGame::TheGame() :
         }
     }
 
-    auto depotTrigger = createTrigger(0, {-5, -5}, { 1, 1 }, GLFW_KEY_E, depotOverlayTriggerCallback);
+    auto depotBuilding = entityManager.create();
+    sceneGraph.create(depotBuilding);
+    sceneGraph.setPosition(depotBuilding, { -10, -10 });
+    sceneGraph.setHeightForDepth(depotBuilding, 4);
+    colliders.create(depotBuilding);
+    colliders.get(depotBuilding).halfExtents = { 7, 4 };
+    dynamics.create(depotBuilding);
+    createSprite(depotBuilding, { 0, 1 }, { 16, 12 }, { 1, 1, 1, 1 }, depotTexture);
+    auto depotTrigger = createTrigger(depotBuilding, { 5, -4.5 }, { 2, 1 }, GLFW_KEY_E, depotOverlayTriggerCallback);
     depots.create(depotTrigger);
-    createSprite(depotTrigger, { 0, 0 }, { 1, 1 }, { 1, 0, 0, 1 }, 0);
 
     createPlayer({ 0, 0 });
 
-    auto testText = entityManager.create();
-    sceneGraph.create(testText);
-    textInstances.create(testText);
-    auto& textInstance = textInstances.get(testText);
-    textInstance.text = "Hello World";
-    drawInstances.create(testText);
-    auto& drawInstance = drawInstances.get(testText);
-    drawInstance.isText = true;
-    drawInstance.layer = 1;
-    drawInstance.size = { 0.5, 1 };
-    drawInstance.color = { 1, 0, 0, 1 };
 }
 
 TheGame::~TheGame()
@@ -255,7 +270,8 @@ void TheGame::update(GLFWwindow* window)
     computeViewExtents(windowWidth, windowHeight, PIXELS_PER_WORLD_UNIT, cameraViewHeight, cameraPosition, sceneViewMinExtents, sceneViewMaxExtents);
     cameraMatrix = glm::ortho(sceneViewMinExtents.x, sceneViewMaxExtents.x, sceneViewMinExtents.y, sceneViewMaxExtents.y);
 
-    uiCameraMatrix = computeViewMatrix(windowWidth, windowHeight, PIXELS_PER_WORLD_UNIT, uiViewHeight, { 0, 0});
+    computeViewExtents(windowWidth, windowHeight, PIXELS_PER_WORLD_UNIT, uiViewHeight, { 0, 0 }, uiViewExtentMin, uiViewExtentMax);
+    uiCameraMatrix = glm::ortho(uiViewExtentMin.x, uiViewExtentMax.x, uiViewExtentMin.y, uiViewExtentMax.y);
 
     double cursorX, cursorY;
     glfwGetCursorPos(window, &cursorX, &cursorY);
@@ -263,9 +279,42 @@ void TheGame::update(GLFWwindow* window)
     glm::vec2 cursorScenePosition = glm::vec2(glm::inverse(cameraMatrix) * cursorNDCPosition);
     glm::vec2 cursorUIPosition = glm::vec2(glm::inverse(uiCameraMatrix) * cursorNDCPosition);
 
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT))
+    {
+        if (!mouseButtonDown)
+        {
+            updateHoveredUIElement(cursorUIPosition);
+            while (hoveredUIElement)
+            {
+                auto& element = uiElements.get(hoveredUIElement);
+                if (element.onClick)
+                {
+                    element.onClick(hoveredUIElement, this);
+                    break;
+                }
+                hoveredUIElement = sceneGraph.getParent(hoveredUIElement);
+            }
+            mouseButtonDown = true;
+        }
+    }
+    else
+    {
+        mouseButtonDown = false;
+    }
+
     for (auto index : triggers.indices())
     {
         auto& trigger = triggers.get(index);
+        if (trigger.active && !trigger.text)
+        {
+            std::string keyName = glfwGetKeyName(trigger.key, 0);
+            trigger.text = createText(0, "Press " + keyName + " to interact", { 0, 0.5f }, { 0.25f, 0.5f }, { 1.0f, 1.0f, 0.0f, 1.0f }, UIElement::Position::Bottom, UIElement::Position::Bottom);
+        }
+        else if (!trigger.active && trigger.text)
+        {
+            sceneGraph.destroyHierarchy(entityManager, trigger.text);
+            trigger.text = 0;
+        }
         if (trigger.active && glfwGetKey(window, trigger.key))
         {
             if (!trigger.triggered)
@@ -283,41 +332,13 @@ void TheGame::update(GLFWwindow* window)
 
     if (enemies.indices().size() < 100)
     {
-        // fixed aspect means visible pop-in likely on ultrawide, but fair
-        glm::vec2 offset = glm::circularRand(0.5f * cameraViewHeight * 16.0f / 9.0f + glm::linearRand(0.0f, 10.0f));
-        createZombie(cameraPosition + offset);
-    }
-
-    if (!players.indices().empty())
-    {
-        auto index = players.indices().front();
-        auto& player = players.get(index);
-        if (player.target)
+        if (enemySpawnTimer >= 0.5f)
         {
-            if (!arrows.has(player.arrow))
-            {
-                player.arrow = entityManager.create();
-                sceneGraph.create(player.arrow, index);
-                sceneGraph.setDepth(player.arrow, -0.2f);
-                arrows.create(player.arrow);
-                auto& arrow = arrows.get(player.arrow);
-                arrow.source = index;
-                arrow.target = player.target;
-                drawInstances.create(player.arrow);
-                auto& instance = drawInstances.get(player.arrow);
-                instance.texture = arrowTexture;
-                instance.size = { 1, 0.5 };
-            }
-            else
-            {
-                arrows.get(player.arrow).target = player.target;
-            }
+            glm::vec2 offset = glm::circularRand(0.5f * cameraViewHeight * 16.0f / 9.0f + glm::linearRand(0.0f, 10.0f));
+            createZombie(cameraPosition + offset);
+            enemySpawnTimer = 0;
         }
-        else if (arrows.has(player.arrow))
-        {
-            entityManager.destroy(player.arrow);
-            player.arrow = 0;
-        }
+        enemySpawnTimer += dt;
     }
 
     for (auto index : arrows.indices())
@@ -335,6 +356,8 @@ void TheGame::update(GLFWwindow* window)
     updateWeapons(dt);
     physicsWorld.update(dt);
     updateHealth(dt);
+    updateDepotOverlay();
+    updateUI();
 }
 
 void TheGame::draw()
@@ -540,6 +563,8 @@ uint32_t TheGame::createPlayer(const glm::vec2& position)
     createWeapon(index, weaponDescription);
     healthComponents.get(index).onDied = playerDiedCallback;
 
+    player.moneyText = createText(0, "", { 0.5f, -0.5f }, { 0.25f, 0.5f }, { 0, 1, 0, 1 }, UIElement::Position::UpperLeft, UIElement::Position::UpperLeft);
+
     return index;
 }
 
@@ -569,6 +594,48 @@ uint32_t TheGame::createOverlay(const glm::vec2& position, const glm::vec2& size
     instance.size = size;
     instance.texture = texture;
 
+    uiElements.create(index);
+
+    {
+        auto closeButtonIndex = entityManager.create();
+        sceneGraph.create(closeButtonIndex, index);
+        sceneGraph.setDepth(closeButtonIndex, 0.1f);
+        drawInstances.create(closeButtonIndex);
+        auto& instance = drawInstances.get(closeButtonIndex);
+        instance.size = { 0.5f, 0.5f };
+        instance.layer = 1;
+        instance.texture = closeButtonTexture;
+        uiElements.create(closeButtonIndex);
+        auto& element = uiElements.get(closeButtonIndex);
+        element.anchor = UIElement::Position::UpperRight;
+        element.position = { -0.5f, -0.5f };
+        element.onClick = closeButtonClickedCallback;
+        closeButtons.create(closeButtonIndex);
+        closeButtons.get(closeButtonIndex).overlay = index;
+    }
+
+    return index;
+}
+
+uint32_t TheGame::createText(uint32_t parent, const std::string& text, const glm::vec2& position, const glm::vec2& scale, const glm::vec4& color, UIElement::Position alignment, UIElement::Position anchor)
+{
+    auto index = entityManager.create();
+    sceneGraph.create(index, parent);
+    sceneGraph.setDepth(index, 0.1f);
+    textInstances.create(index);
+    auto& textInstance = textInstances.get(index);
+    textInstance.text = text;
+    drawInstances.create(index);
+    auto& drawInstance = drawInstances.get(index);
+    drawInstance.isText = true;
+    drawInstance.layer = 1;
+    drawInstance.size = scale;
+    drawInstance.color = color;
+    uiElements.create(index);
+    auto& element = uiElements.get(index);
+    element.position = position;
+    element.anchor = anchor;
+    element.textAlign = alignment;
     return index;
 }
 
@@ -607,7 +674,7 @@ void TheGame::updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosit
 {
     for (auto index : players.indices())
     {
-        const auto& player = players.get(index);
+        auto& player = players.get(index);
         glm::vec2 playerToCursor = cursorScenePosition - sceneGraph.getWorldTransform(index).position;
         if (playerToCursor.x > 0.2f)
         {
@@ -652,6 +719,40 @@ void TheGame::updatePlayer(GLFWwindow* window, const glm::vec2& cursorScenePosit
                 weapon.stateTimer = 0;
             }
         }
+
+        if (player.target)
+        {
+            if (!arrows.has(player.arrow))
+            {
+                player.arrow = entityManager.create();
+                sceneGraph.create(player.arrow);
+                sceneGraph.setDepth(player.arrow, -0.2f);
+                arrows.create(player.arrow);
+                auto& arrow = arrows.get(player.arrow);
+                arrow.source = index;
+                arrow.target = player.target;
+                drawInstances.create(player.arrow);
+                auto& instance = drawInstances.get(player.arrow);
+                instance.texture = arrowTexture;
+                instance.size = { 1, 0.5 };
+                instance.layer = 1;
+                uiElements.create(player.arrow);
+                auto& element = uiElements.get(player.arrow);
+                element.anchor = UIElement::Position::UpperLeft;
+                element.position = { 0.65f, -1.65f };
+            }
+            else
+            {
+                arrows.get(player.arrow).target = player.target;
+            }
+        }
+        else if (arrows.has(player.arrow))
+        {
+            entityManager.destroy(player.arrow);
+            player.arrow = 0;
+        }
+
+        textInstances.get(player.moneyText).text = getMoneyString(player.money);
     }
 }
 
@@ -677,14 +778,33 @@ void TheGame::updateEnemyAI(float dt)
             }
         }
 
+        if (toPlayerDistance > 0.0001)
+        {
+            toPlayerDistance = std::sqrt(toPlayerDistance);
+        }
+
         enemy.moveInput = glm::vec2(0);
-        if (target != 0 && toPlayerDistance < 25.0f)
+        if (target != 0 && toPlayerDistance < enemy.noticeDistance)
         {
             enemy.state = Enemy::State::Hunting;
         }
         else
         {
             enemy.state = Enemy::State::Idle;
+        }
+
+        if (toPlayerDistance >= enemy.despawnDistance)
+        {
+            enemy.despawnTimer += dt * (toPlayerDistance / enemy.despawnDistance);
+            if (enemy.despawnTimer >= enemy.despawnTime)
+            {
+                healthComponents.get(index).value = 0;
+                continue;
+            }
+        }
+        else
+        {
+            enemy.despawnTimer = std::max(0.0f, enemy.despawnTimer - dt);
         }
 
         switch (enemy.state)
@@ -825,6 +945,208 @@ void TheGame::updateHealth(float dt)
     }
 }
 
+void TheGame::updateUI()
+{
+    for (auto index : uiElements.indices())
+    {
+        const auto& element = uiElements.get(index);
+        const auto& instance = drawInstances.get(index);
+
+        glm::vec2 minParentExtent = uiViewExtentMin;
+        glm::vec2 maxParentExtent = uiViewExtentMax;
+        auto parent = sceneGraph.getParent(index);
+        if (drawInstances.has(parent))
+        {
+            auto& parentInstance = drawInstances.get(parent);
+            maxParentExtent = 0.5f * parentInstance.size;
+            minParentExtent = -0.5f * parentInstance.size;
+        }
+
+        glm::vec2 basePosition(0.0f);
+        switch (element.anchor)
+        {
+            case UIElement::Position::Center:
+                basePosition = { 0.0f, 0.0f };
+                break;
+            case UIElement::Position::Left:
+                basePosition = { minParentExtent.x, 0.0f };
+                break;
+            case UIElement::Position::Right:
+                basePosition = { maxParentExtent.x, 0.0f };
+                break;
+            case UIElement::Position::Bottom:
+                basePosition = { 0.0f, minParentExtent.y }; 
+                break;
+            case UIElement::Position::Top:
+                basePosition = { 0.0f, maxParentExtent.y }; 
+                break;
+            case UIElement::Position::LowerLeft:
+                basePosition = { minParentExtent.x, minParentExtent.y };
+                break;
+            case UIElement::Position::UpperLeft:
+                basePosition = { minParentExtent.x, maxParentExtent.y };
+                break;
+            case UIElement::Position::LowerRight:
+                basePosition = { maxParentExtent.x, minParentExtent.y };
+                break;
+            case UIElement::Position::UpperRight:
+                basePosition = { maxParentExtent.x, maxParentExtent.y };
+                break;
+            default:
+                break;
+        }
+
+        glm::vec2 offset(0);
+        if (textInstances.has(index))
+        {
+            const auto& textInstance = textInstances.get(index);
+            glm::vec2 size(instance.size.x * textInstance.text.size(), instance.size.y);
+            switch (element.textAlign)
+            {
+                case UIElement::Position::Center:
+                    offset = 0.5f * size;
+                    break;
+                case UIElement::Position::Left:
+                    offset = { 0.0f, 0.5f * size.y };
+                    break;
+                case UIElement::Position::Right:
+                    offset = { size.x, 0.5f * size.y };
+                    break;
+                case UIElement::Position::Bottom:
+                    offset = { 0.5f * size.x, 0.0f }; 
+                    break;
+                case UIElement::Position::Top:
+                    offset = { 0.5f * size.x, size.y };
+                    break;
+                case UIElement::Position::LowerLeft:
+                    offset = { 0.0f, 0.0f };
+                    break;
+                case UIElement::Position::UpperLeft:
+                    offset = { 0.0f, size.y };
+                    break;
+                case UIElement::Position::LowerRight:
+                    offset = { size.x, 0.0f };
+                    break;
+                case UIElement::Position::UpperRight:
+                    offset = size;
+                    break;
+                default:
+                    break;
+            }
+        }
+        sceneGraph.setPosition(index, element.position + basePosition - offset);
+    }
+}
+
+void TheGame::updateHoveredUIElement(const glm::vec2& cursorUIPosition)
+{
+    hoveredUIElement = 0;
+    float depth = 0.0f;
+    for (auto index : uiElements.indices())
+    {
+        const auto& instance = drawInstances.get(index);
+        glm::vec2 minExtent = -0.5f * instance.size;
+        glm::vec2 maxExtent = 0.5f * instance.size;
+        if (instance.isText)
+        {
+            minExtent = { 0.0f, 0.0f };
+            maxExtent = instance.size * glm::vec2{ textInstances.get(index).text.size(), 1.0f };
+        }
+
+        glm::vec2 delta = cursorUIPosition - sceneGraph.getWorldTransform(index).position;
+        if (glm::all(glm::lessThanEqual(minExtent, delta)) && glm::all(glm::lessThanEqual(delta, maxExtent)))
+        {
+            if (!hoveredUIElement || sceneGraph.getWorldTransform(index).depth > depth)
+            {
+                hoveredUIElement = index;
+                depth = sceneGraph.getWorldTransform(index).depth;
+            }
+        }
+    }
+}
+
+void TheGame::updateDepotOverlay()
+{
+    if (players.indices().empty())
+    {
+        return;
+    }
+    auto& player = players.get(players.indices().front());
+    glm::vec2 playerPosition = sceneGraph.getWorldTransform(players.indices().front()).position;
+
+    for (const auto index : depotOverlays.indices())
+    {
+        auto& overlay = depotOverlays.get(index);
+        uint32_t deliveriesArrayIndex = 0;
+        while (overlay.deliveryItems.size() < 3)
+        {
+            auto deliveryIndex = 0;
+            while (deliveriesArrayIndex < deliveries.indices().size())
+            {
+                deliveryIndex = deliveries.indices()[deliveriesArrayIndex++];
+                for (const auto& existingItem : overlay.deliveryItems)
+                {
+                    if (deliveryIndex == overlayDeliveryItems.get(existingItem).delivery)
+                    {
+                        deliveryIndex = 0;
+                        break;
+                    }
+                }
+
+                if (deliveries.has(player.delivery) && deliveryIndex == player.delivery)
+                {
+                    deliveryIndex = 0;
+                }
+
+                if (deliveryIndex)
+                {
+                    break;
+                }
+            }
+
+            if (!deliveryIndex)
+            {
+                deliveryIndex = entityManager.create();
+                deliveries.create(deliveryIndex);
+                auto& delivery = deliveries.get(deliveryIndex);
+                delivery.address = addresses.indices()[rand() % addresses.indices().size()];
+                delivery.value = glm::linearRand(3.0f, 15.0f);
+            }
+            auto& delivery = deliveries.get(deliveryIndex);
+
+            auto item = entityManager.create();
+            overlayDeliveryItems.create(item);
+            overlayDeliveryItems.get(item).delivery = deliveryIndex;
+            sceneGraph.create(item, index);
+            sceneGraph.setDepth(item, 0.1f);
+            uiElements.create(item);
+            auto& element = uiElements.get(item);
+            element.anchor = UIElement::Position::Top;
+            element.onClick = overlayDeliveryItemClickedCallback;
+            drawInstances.create(item);
+            auto& instance = drawInstances.get(item);
+            instance.size = { 5, 1.25 };
+            instance.color = { 0.8, 0.8, 0.8, 1 };
+            instance.layer = 1;
+
+            glm::vec2 destination = sceneGraph.getWorldTransform(delivery.address).position;
+            float distance = glm::length(destination - playerPosition);
+            std::stringstream distanceStream;
+            distanceStream.precision(2);
+            distanceStream << "Distance: " << (distance / 1000.0f) << " km" << std::flush;
+            createText(item, distanceStream.str(), { 0, 0 }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::Bottom, UIElement::Position::Center);
+            createText(item, "Amount: " + getMoneyString(delivery.value), { 0, 0 }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::Top, UIElement::Position::Center);
+
+            overlay.deliveryItems.push_back(item);
+        }
+
+        for (int i = 0; i < overlay.deliveryItems.size(); ++i)
+        {
+            uiElements.get(overlay.deliveryItems[i]).position = { 0, -1 - 1.5f * i };
+        }
+    }
+}
+
 void TheGame::onWeaponCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord)
 {
     const auto& weapon = weapons.get(index);
@@ -851,29 +1173,19 @@ void TheGame::onTriggerCollision(uint32_t index, uint32_t other, const Collision
 
 void TheGame::onTriggerDepotOverlay()
 {
-    // std::cout << "show depot overlay" << std::endl;
-    // createOverlay({ 0, 0 }, { 8, 5 }, 0 );
-    if (players.indices().empty())
+    if (depotOverlays.indices().empty())
     {
-        return;
-    }
-    auto& player = players.get(players.indices().front());
-    if (!deliveries.has(player.delivery) && !addresses.indices().empty())
-    {
-        std::cout << "giving delivery" << std::endl;
-        player.delivery = entityManager.create();
-        deliveries.create(player.delivery);
-        auto& delivery = deliveries.get(player.delivery);
-        delivery.address = addresses.indices()[rand() % addresses.indices().size()];
-        delivery.value = glm::linearRand(3.0f, 15.0f);
-        player.target = delivery.address;
+        auto overlay = createOverlay({ 0, 0 }, { 8, 5 }, 0 );
+        depotOverlays.create(overlay);
+        createText(overlay, "Depot", { 0.1f, -0.1f }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::UpperLeft, UIElement::Position::UpperLeft);
     }
 }
 
-void TheGame::onPlayerDied()
+void TheGame::onPlayerDied(uint32_t index)
 {
-    // consider doing something here...
-    std::cout << "YOU DIED" << std::endl;
+    auto& player = players.get(index);
+    sceneGraph.destroyHierarchy(entityManager, player.arrow);
+    createText(0, "YOU DIED", { 0, 0 }, { 1, 2 }, { 1, 0, 0, 1 });
 }
 
 bool TheGame::hasDeliveryForAddress(uint32_t address)
@@ -888,9 +1200,31 @@ bool TheGame::hasDeliveryForAddress(uint32_t address)
 
 void TheGame::completeDelivery()
 {
-    std::cout << "delivery complete" << std::endl;
     auto& player = players.get(players.indices().front());
+    player.money += deliveries.get(player.delivery).value;
     entityManager.destroy(player.delivery);
     player.delivery = 0;
     player.target = depots.indices().front();
+}
+
+void TheGame::closeButtonClicked(uint32_t index)
+{
+    auto& closeButton = closeButtons.get(index);
+    sceneGraph.destroyHierarchy(entityManager, closeButton.overlay);
+}
+
+void TheGame::overlayDeliveryItemClicked(uint32_t index)
+{
+    if (players.indices().empty())
+    {
+        return;
+    }
+
+    auto& player = players.get(players.indices().front());
+    player.delivery = overlayDeliveryItems.get(index).delivery;
+    player.target = deliveries.get(player.delivery).address;
+
+    auto& overlay = depotOverlays.get(sceneGraph.getParent(index));
+    overlay.deliveryItems.erase(std::find(overlay.deliveryItems.begin(), overlay.deliveryItems.end(), index));
+    sceneGraph.destroyHierarchy(entityManager, index);
 }

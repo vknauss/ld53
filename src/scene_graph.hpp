@@ -48,6 +48,7 @@ public:
     void setDepth(uint32_t index, float depth);
     void setHeightForDepth(uint32_t index, float heightForDepth);
 
+    uint32_t getParent(uint32_t index) const;
     const Transform& getLocalTransform(uint32_t index) const;
     const Transform& getWorldTransform(uint32_t index);
 

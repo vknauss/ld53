@@ -132,6 +132,11 @@ void SceneGraph::setHeightForDepth(uint32_t index, float heightForDepth)
     setDirty(index);
 }
 
+uint32_t SceneGraph::getParent(uint32_t index) const
+{
+    return get(index).parent;
+}
+
 const Transform& SceneGraph::getLocalTransform(uint32_t index) const
 {
     return get(index).local;
