@@ -17,4 +17,4 @@ depends = [
   dependency('vorbisfile'),
 ]
 
-executable('ld53', sources, include_directories: includedirs, dependencies: depends)
+executable('ld53', sources, include_directories: includedirs, dependencies: depends, build_rpath: 'lib')
