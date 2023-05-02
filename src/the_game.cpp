@@ -10,6 +10,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 // #include <glm/gtx/string_cast.hpp>
 
+#include "audio.h"
 #include "opengl_utils.hpp"
 
 #define PIXELS_PER_WORLD_UNIT 32
@@ -120,6 +121,13 @@ TheGame::TheGame() :
     fpsTimer(timerValue),
     frames(0)
 {
+    audio = newAudio();
+    initAudio(audio);
+
+    bonkSound = newSound("audio/bonk.ogg", false);
+
+    startAudioStream(audio);
+
     entityManager.addComponentManager(sceneGraph);
     entityManager.addComponentManager(arrows);
     // entityManager.addComponentManager(behaviors);
@@ -259,6 +267,9 @@ TheGame::~TheGame()
     {
         glDeleteTextures(1, &texture);
     }
+    stopAudioStream(audio);
+    cleanupAudio(audio);
+    freeAudio(audio);
 }
 
 void TheGame::updateTemporaries(float dt)
@@ -476,6 +487,8 @@ void TheGame::update(GLFWwindow* window)
     updatePauseOverlay();
     updateUI();
     updateTemporaries(dt);
+
+    audioUpdate(audio);
 }
 
 void TheGame::draw()
@@ -1329,6 +1342,7 @@ void TheGame::onWeaponCollision(uint32_t index, uint32_t other, const CollisionR
         {
             health.value -= hurtbox.multiplier * weapon.damage;
             health.takingDamage = true;
+            audioPlaySound(audio, bonkSound);
         }
     }
 }

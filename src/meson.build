@@ -1,4 +1,5 @@
 sources += files(
+  'audio.c',
   'main.cpp',
   'opengl_utils.cpp',
   'physics_world.cpp',

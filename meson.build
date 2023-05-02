@@ -8,10 +8,13 @@ subdir('src')
 subdir('shaders')
 subdir('textures')
 subdir('thirdparty')
+subdir('audio')
 
 depends = [
   dependency('glfw3'),
-  dependency('GL')
+  dependency('GL'),
+  dependency('portaudio-2.0'),
+  dependency('vorbisfile'),
 ]
 
 executable('ld53', sources, include_directories: includedirs, dependencies: depends)

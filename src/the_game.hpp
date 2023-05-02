@@ -228,8 +228,13 @@ struct StoreOverlay
     std::vector<uint32_t> storeItems;
 };
 
+struct Audio;
+struct Sound;
+
 class TheGame final : public Game
 {
+    Audio* audio = NULL;
+    Sound* bonkSound = NULL;
     SceneGraph sceneGraph;
     ComponentManager<Arrow> arrows;
     // ComponentManager<Behavior> behaviors;
