@@ -13,6 +13,7 @@ subdir('audio')
 depends = [
   dependency('glfw3'),
   dependency('GL'),
+  dependency('glm'),
   dependency('portaudio-2.0'),
   dependency('vorbisfile'),
 ]
