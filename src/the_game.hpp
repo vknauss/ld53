@@ -284,6 +284,19 @@ class TheGame final : public Game
     float enemySpawnTimer = 0;
     GLuint closeButtonTexture;
     bool mouseButtonDown = false;
+    float zombieLevel = 0.1f;
+    float zombieLevelRate = 0.01;
+    uint32_t zombieLevelText = 0;
+    bool paused = false;
+    int deliveriesCompleted = 0;
+    float lifetimeMoney = 0;
+    double gameTime = 0;
+    bool escapeDown = false;
+    bool pDown = false;
+    bool fDown = false;
+    bool isFullscreen = false;
+    uint32_t pauseOverlay = 0;
+    bool isGameOver = false;
 
 public:
     TheGame();
@@ -300,7 +313,7 @@ public:
     uint32_t createTrigger(uint32_t parent, const glm::vec2& position, const glm::vec2& size, int key, GenericCallback callback, ConditionCallback condition = nullptr);
     uint32_t createPlayer(const glm::vec2& position);
     uint32_t createZombie(const glm::vec2& position);
-    uint32_t createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture);
+    uint32_t createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture, bool closeButton = true);
     uint32_t createText(uint32_t parent, const std::string& text, const glm::vec2& position, const glm::vec2& scale, const glm::vec4& color, UIElement::Position alignment = UIElement::Position::Center, UIElement::Position anchor = UIElement::Position::Center);
     uint32_t createButton(uint32_t overlay, const glm::vec2& size, const glm::vec4& color, float spacing, int index, GenericCallback onClick);
 
@@ -316,6 +329,8 @@ public:
     void updateStoreOverlayItems();
     // void updateBehaviors(float dt);
     void updateTemporaries(float dt);
+    void updateZombieLevel(float dt);
+    void updatePauseOverlay();
 
     void setCharacterFlipHorizontal(uint32_t index, bool flipHorizontal);
     void onWeaponCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord);
@@ -330,4 +345,5 @@ public:
     void showStoreOverlay();
     void showDeliveryOverlay();
     void closeDepotOverlay();
+    void showGameOverOverlay();
 };

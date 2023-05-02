@@ -296,7 +296,71 @@ void TheGame::update(GLFWwindow* window)
         dt = static_cast<float>(static_cast<double>(timerValue - previousTimer) / static_cast<double>(glfwGetTimerFrequency()));
     }
 
-    if (timerValue - fpsTimer >= glfwGetTimerFrequency())
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE))
+    {
+        if (!escapeDown)
+        {
+            if (paused)
+            {
+                glfwSetWindowShouldClose(window, true);
+            }
+            else
+            {
+                paused = true;
+            }
+        }
+        escapeDown = true;
+    }
+    else
+    {
+        escapeDown = false;
+    }
+
+    if (glfwGetKey(window, GLFW_KEY_P))
+    {
+        if (!pDown)
+        {
+            paused = !paused;
+        }
+        pDown = true;
+    }
+    else
+    {
+        pDown = false;
+    }
+
+    if (glfwGetKey(window, GLFW_KEY_F))
+    {
+        if (!fDown)
+        {
+            if (!isFullscreen)
+            {
+                GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+                const GLFWvidmode* videoMode = glfwGetVideoMode(monitor);
+                glfwSetWindowMonitor(window, monitor, 0, 0, videoMode->width, videoMode->height, videoMode->refreshRate);
+                isFullscreen = true;
+            }
+            else
+            {
+                glfwSetWindowMonitor(window, NULL, 0, 0, 0, 0, 0);
+                isFullscreen = false;
+            }
+        }
+        fDown = true;
+    }
+    else
+    {
+        fDown = false;
+    }
+            
+
+    if (paused)
+    {
+        dt = 0;
+    }
+    gameTime += dt;
+
+    /* if (timerValue - fpsTimer >= glfwGetTimerFrequency())
     {
         double fps = static_cast<double>(frames * glfwGetTimerFrequency()) / static_cast<double>(timerValue - fpsTimer);
         std::string windowTitle = "FPS: " + std::to_string(static_cast<int>(fps + 0.5));
@@ -304,7 +368,7 @@ void TheGame::update(GLFWwindow* window)
         frames = 0;
         fpsTimer = timerValue;
     }
-    ++frames;
+    ++frames; */
 
     glfwGetFramebufferSize(window, &windowWidth, &windowHeight);
     glm::mat4 pixelOrtho = glm::ortho<float>(0, windowWidth, 0, windowHeight);
@@ -312,7 +376,7 @@ void TheGame::update(GLFWwindow* window)
     if (!players.indices().empty())
     {
         glm::vec2 cameraToPlayer = sceneGraph.getWorldTransform(players.indices().front()).position - cameraPosition;
-        cameraPosition += dt * cameraToPlayer;
+        cameraPosition += 3.5f * dt * cameraToPlayer;
     }
 
     glm::vec2 sceneViewMinExtents, sceneViewMaxExtents;
@@ -379,9 +443,9 @@ void TheGame::update(GLFWwindow* window)
         triggers.get(index).active = false;
     }
 
-    if (enemies.indices().size() < 100)
+    if (enemies.indices().size() < zombieLevel * 100)
     {
-        if (enemySpawnTimer >= 0.5f)
+        if (enemySpawnTimer >= 0.1f / zombieLevel)
         {
             glm::vec2 offset = glm::circularRand(0.5f * cameraViewHeight * 16.0f / 9.0f + glm::linearRand(0.0f, 10.0f));
             createZombie(cameraPosition + offset);
@@ -400,6 +464,7 @@ void TheGame::update(GLFWwindow* window)
         }
     }
     
+    updateZombieLevel(dt);
     updatePlayer(window, cursorScenePosition, dt);
     updateEnemyAI(dt);
     updateWeapons(dt);
@@ -408,6 +473,7 @@ void TheGame::update(GLFWwindow* window)
     updateDeliveryOverlay();
     // updateStoreOverlay();
     updateStoreOverlayItems();
+    updatePauseOverlay();
     updateUI();
     updateTemporaries(dt);
 }
@@ -622,19 +688,22 @@ uint32_t TheGame::createPlayer(const glm::vec2& position)
 
 uint32_t TheGame::createZombie(const glm::vec2& position)
 {
+    float level = glm::gaussRand(zombieLevel, 0.1f * zombieLevel);
+
     auto index = createCharacter(position, zombieBodyDescription);
     enemies.create(index);
     Enemy& enemy = enemies.get(index);
-    enemy.speed = 2.0f;
+    enemy.speed = 5.0f * level;
     enemy.moveInput = glm::vec2(0.0f);
     enemy.state = Enemy::State::Idle;
     enemy.attackRechargeTime = 0.5f;
     createWeapon(index, zombieWeaponDescription);
+    weapons.get(characters.get(index).weapon).damage *= level;
 
     return index;
 }
 
-uint32_t TheGame::createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture)
+uint32_t TheGame::createOverlay(const glm::vec2& position, const glm::vec2& size, GLuint texture, bool closeButton)
 {
     auto index = entityManager.create();
     sceneGraph.create(index);
@@ -648,6 +717,7 @@ uint32_t TheGame::createOverlay(const glm::vec2& position, const glm::vec2& size
 
     uiElements.create(index);
 
+    if (closeButton)
     {
         auto closeButtonIndex = entityManager.create();
         sceneGraph.create(closeButtonIndex, index);
@@ -1117,6 +1187,27 @@ void TheGame::updateHoveredUIElement(const glm::vec2& cursorUIPosition)
     }
 }
 
+void TheGame::updatePauseOverlay()
+{
+    if (paused && !isGameOver)
+    {
+        if (pauseOverlay)
+        {
+            return;
+        }
+
+        pauseOverlay = createOverlay({ 0, 0 }, { 8, 5 }, 0, false);
+        createText(pauseOverlay, "PAUSED", { 0, -0.25f }, { 0.5, 1.0 }, { 0, 0, 0, 1 }, UIElement::Position::Top, UIElement::Position::Top);
+        createText(pauseOverlay, std::string(glfwGetKeyName(GLFW_KEY_P, 0)) + " to unpause", { 0, -2 }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::Top, UIElement::Position::Top);
+        createText(pauseOverlay, "Esc to quit", { 0, -3 }, { 0.25f, 0.5f }, { 0, 0, 0, 1 }, UIElement::Position::Top, UIElement::Position::Top);
+    }
+    else if (pauseOverlay)
+    {
+        sceneGraph.destroyHierarchy(entityManager, pauseOverlay);
+        pauseOverlay = 0;
+    }
+}
+
 void TheGame::updateDeliveryOverlay()
 {
     if (players.indices().empty())
@@ -1194,7 +1285,7 @@ void TheGame::updateDeliveryOverlay()
 
         for (int i = 0; i < overlay.deliveryItems.size(); ++i)
         {
-            uiElements.get(overlay.deliveryItems[i]).position = { 0, -1 - 1.5f * i };
+            uiElements.get(overlay.deliveryItems[i]).position = { 0, -1.25f - 1.5f * i };
         }
     }
 }
@@ -1212,6 +1303,19 @@ void TheGame::updateStoreOverlayItems()
             overlayItem.lastCost = item.cost;
         }
     }
+}
+
+void TheGame::updateZombieLevel(float dt)
+{
+    if (!zombieLevelText)
+    {
+        zombieLevelText = createText(0, "", { 0.5, 0.5 }, { 0.25, 0.5 }, { 1, 0, 0, 1 }, UIElement::Position::LowerLeft, UIElement::Position::LowerLeft);
+    }
+    zombieLevel = zombieLevel * std::exp(zombieLevelRate * dt);
+    std::stringstream zombieLevelTextStream;
+    zombieLevelTextStream.precision(2);
+    zombieLevelTextStream << "Zombie level: " << zombieLevel << std::endl;
+    textInstances.get(zombieLevelText).text = zombieLevelTextStream.str();
 }
 
 void TheGame::onWeaponCollision(uint32_t index, uint32_t other, const CollisionRecord& collisionRecord)
@@ -1339,7 +1443,10 @@ void TheGame::onPlayerDied(uint32_t index)
 {
     auto& player = players.get(index);
     sceneGraph.destroyHierarchy(entityManager, player.arrow);
-    createText(0, "YOU DIED", { 0, 0 }, { 1, 2 }, { 1, 0, 0, 1 });
+    // createText(0, "YOU DIED", { 0, 0 }, { 1, 2 }, { 1, 0, 0, 1 });
+    showGameOverOverlay();
+    paused = true;
+    isGameOver = true;
 }
 
 bool TheGame::hasDeliveryForAddress(uint32_t address)
@@ -1355,7 +1462,10 @@ bool TheGame::hasDeliveryForAddress(uint32_t address)
 void TheGame::completeDelivery()
 {
     auto& player = players.get(players.indices().front());
-    player.money += deliveries.get(player.delivery).value;
+    float value = deliveries.get(player.delivery).value;
+    player.money += value;
+    lifetimeMoney += value;
+    ++deliveriesCompleted;
     entityManager.destroy(player.delivery);
     player.delivery = 0;
     player.target = depots.indices().front();
@@ -1432,4 +1542,17 @@ void TheGame::closeDepotOverlay()
     }
 
     sceneGraph.destroyHierarchy(entityManager, depotOverlays.indices().front());
+}
+
+void TheGame::showGameOverOverlay()
+{
+    auto overlay = createOverlay({ 0, 0 }, { 8, 5 }, 0, false);
+    createText(overlay, "GAME OVER", { 0, -0.1f }, { 0.25f, 0.5f }, { 1, 0, 0, 1 }, UIElement::Position::Top, UIElement::Position::Top);
+
+    createText(overlay, "Time:", { -0.1f, -1 }, { 0.25, 0.5 }, { 0, 0, 0, 1 }, UIElement::Position::Right, UIElement::Position::Top);
+    createText(overlay, std::to_string(gameTime), { 0.1f, -1 }, { 0.25, 0.5 }, { 0, 0, 0, 1 }, UIElement::Position::Left, UIElement::Position::Top);
+    createText(overlay, "Deliveries completed:", { -0.1f, -2 }, { 0.25, 0.5 }, { 0, 0, 0, 1 }, UIElement::Position::Right, UIElement::Position::Top);
+    createText(overlay, std::to_string(deliveriesCompleted), { 0.1f, -2 }, { 0.25, 0.5 }, { 0, 0, 0, 1 }, UIElement::Position::Left, UIElement::Position::Top);
+    createText(overlay, "Lifetime earnings:", { -0.1f, -3 }, { 0.25, 0.5 }, { 0, 0, 0, 1 }, UIElement::Position::Right, UIElement::Position::Top);
+    createText(overlay, getMoneyString(lifetimeMoney), { 0.1f, -3 }, { 0.25, 0.5 }, { 0, 0, 0, 1 }, UIElement::Position::Left, UIElement::Position::Top);
 }
