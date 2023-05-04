@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #include "the_game.hpp"
 
 #include <algorithm>
@@ -192,7 +193,7 @@ TheGame::TheGame() :
     zombieBodyDescription.maxHealth = 10.0f;
 
     weaponAnimation = {};
-    weaponAnimation.poseAngles = { 0.0f, -M_PI_2f, M_PI_4f, 0.0f };
+    weaponAnimation.poseAngles = { 0.0f, -M_PI_2, M_PI_4, 0.0f };
     weaponAnimation.poseTimes = { 0.0f, 0.1f, 0.2f, 0.45f };
     weaponAnimation.poseSharp = { false, true, false, false };
 
@@ -204,7 +205,7 @@ TheGame::TheGame() :
     weaponDescription.texture = 0;
 
     zombieWeaponAnimation = {};
-    zombieWeaponAnimation.poseAngles = { -M_PI_2f, -M_PI_2f - M_PI_4f, -M_PI_2f - M_PI_4f, -M_PI_2f + M_PI_4f, -M_PI_2f };
+    zombieWeaponAnimation.poseAngles = { -M_PI_2, -M_PI_2 - M_PI_4, -M_PI_2 - M_PI_4, -M_PI_2 + M_PI_4, -M_PI_2 };
     zombieWeaponAnimation.poseTimes = { 0.0f, 0.2f, 0.5f, 0.6f, 0.8f };
     zombieWeaponAnimation.poseSharp = { false, false, true, false, false };
 
@@ -637,7 +638,7 @@ uint32_t TheGame::createCharacter(const glm::vec2& position, const CharacterDesc
     character.frontHand = entityManager.create();
     sceneGraph.create(character.frontHand, character.frontShoulder);
     sceneGraph.setPosition(character.frontHand, { 0, -description.armLength });
-    sceneGraph.setRotation(character.frontHand, M_PI_2f);
+    sceneGraph.setRotation(character.frontHand, M_PI_2);
 
     character.backShoulder = entityManager.create();
     sceneGraph.create(character.backShoulder, index);
@@ -647,7 +648,7 @@ uint32_t TheGame::createCharacter(const glm::vec2& position, const CharacterDesc
     character.backHand = entityManager.create();
     sceneGraph.create(character.backHand, character.backShoulder);
     sceneGraph.setPosition(character.backHand, { 0, -description.armLength });
-    sceneGraph.setRotation(character.backHand, -M_PI_2f);
+    sceneGraph.setRotation(character.backHand, -M_PI_2);
 
     character.spriteIndices.push_back(createSprite(index, { 0, 0.5f * (description.bodyDrawSize.y - description.baseSize.y) }, description.bodyDrawSize, description.color, description.characterTexture));
     character.spriteIndices.push_back(createSprite(character.frontShoulder, { 0, -0.5f * description.armLength }, description.armDrawSize, description.color, description.armTexture));
