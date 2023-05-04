@@ -14,13 +14,20 @@ struct Sound
     float* samples;
     uint32_t numFrames;
     uint32_t numChannels;
+};
+
+typedef struct PlayingSoundInfo
+{
+    const Sound* sound;
+    uint32_t currentFrame;
     bool loop;
     bool finished;
-};
+} PlayingSoundInfo;
 
 typedef struct PlayingSoundsBuffer
 {
-    Sound* sounds[256];
+    PlayingSoundInfo* sounds[256];
+    bool finished[256];
     uint32_t numSounds;
 } PlayingSoundsBuffer;
 
@@ -29,10 +36,10 @@ struct Audio
     PaStream* stream;
     uint32_t numChannels;
     bool dirty;
-    struct PlayingSoundsBuffer buffers[3];
+    PlayingSoundsBuffer buffers[2];
+    PlayingSoundsBuffer masterBuffer;
     int playing;
     int lastPlaying;
-    int editing;
 };
 
 Audio* newAudio(void)
@@ -45,44 +52,57 @@ void freeAudio(Audio* audio)
     free(audio);
 }
 
-struct PlayingSoundsBuffer* volatile currentBuffer = NULL;
-
-static uint32_t currentFrame = 0;
+PlayingSoundsBuffer* volatile currentBuffer = NULL;
+PlayingSoundsBuffer* volatile confirmCurrentBuffer = NULL;
 
 static int streamCallback(const void* inputBuffer, void* outputBuffer, unsigned long framesPerBuffer, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData)
 {
     Audio* audio = userData;
 
-    PlayingSoundsBuffer* soundBuffer = currentBuffer;
+    if (confirmCurrentBuffer != currentBuffer)
+    {
+        printf("new buffer received. num sounds: %d\n", currentBuffer->numSounds);
+    }
+
+    PlayingSoundsBuffer* soundBuffer = confirmCurrentBuffer = currentBuffer;
     memset(outputBuffer, 0, sizeof(float) * audio->numChannels * framesPerBuffer);
 
-    for (uint32_t soundIndex = 0; soundIndex < soundBuffer->numSounds; ++soundIndex)
+    for (uint32_t i = 0; i < soundBuffer->numSounds; ++i)
     {
-        Sound* sound = soundBuffer->sounds[soundIndex];
-        if (!sound || sound->finished || sound->numFrames == 0)
+        if (soundBuffer->finished[i])
         {
-            return paContinue;
+            continue;
         }
 
-        for (uint32_t i = 0; i < framesPerBuffer; ++i, ++currentFrame)
+        PlayingSoundInfo* info = soundBuffer->sounds[i];
+        if (!info->sound || info->sound->numFrames == 0)
         {
-            if (currentFrame >= sound->numFrames)
+            info->finished = true;
+            soundBuffer->finished[i] = true;
+            continue;
+        }
+
+        for (uint32_t i = 0; i < framesPerBuffer; ++i, ++info->currentFrame)
+        {
+            if (info->currentFrame >= info->sound->numFrames)
             {
-                if (sound->loop)
+                if (info->loop)
                 {
-                    currentFrame = 0;
+                    info->currentFrame = 0;
                 }
                 else
                 {
-                    sound->finished = true;
+                    info->finished = true;
+                    soundBuffer->finished[i] = true;
                     break;
                 }
             }
 
             for (uint32_t j = 0; j < audio->numChannels; ++j)
             {
-                uint64_t sampleIndex = currentFrame * sound->numChannels + (j < sound->numChannels ? j : sound->numChannels - 1);
-                ((float*)outputBuffer)[i * audio->numChannels + j] += 0.1f * sound->samples[sampleIndex];
+                uint32_t channel = j < info->sound->numChannels ? j : info->sound->numChannels - 1;
+                uint64_t sampleIndex = info->currentFrame * info->sound->numChannels + channel;
+                ((float*)outputBuffer)[i * audio->numChannels + j] += 0.1f * info->sound->samples[sampleIndex];
             }
         }
     }
@@ -111,7 +131,6 @@ bool initAudio(Audio* audio)
 
     audio->playing = 0;
     audio->lastPlaying = 1;
-    audio->editing = 2;
     currentBuffer = &audio->buffers[audio->playing];
 
     PaError error;
@@ -202,15 +221,20 @@ void cleanupAudio(Audio* audio)
         fprintf(stderr, "Failed to terminate PortAudio: %s\n", Pa_GetErrorText(error));
     }
 
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 2; ++i)
     {
-        for (uint32_t j = 0; j < audio->buffers[i].numSounds; ++j)
+        /* for (uint32_t j = 0; j < audio->buffers[i].numSounds; ++j)
         {
             free(audio->buffers[i].sounds[j]);
             audio->buffers[i].sounds[j] = NULL;
-        }
+        } */
         audio->buffers[i].numSounds = 0;
     }
+    for (uint32_t i = 0; i < audio->masterBuffer.numSounds; ++i)
+    {
+        free(audio->masterBuffer.sounds[i]);
+    }
+    audio->masterBuffer.numSounds = 0;
 }
 
 bool startAudioStream(Audio* audio)
@@ -259,11 +283,12 @@ Sound* newSound(const char* filename, bool loop)
     printf("time total: %f\n", ov_time_total(&file, -1)); */
 
     Sound* sound = malloc(sizeof(Sound));
+    memset(sound, 0, sizeof(*sound));
     sound->numFrames = ov_pcm_total(&file, -1);
     sound->numChannels = info->channels;
     sound->samples = malloc(sizeof(float) * sound->numChannels * sound->numFrames);
-    sound->loop = loop;
-    sound->finished = false;
+    /* sound->loop = loop;
+    sound->finished = false; */
 
     bool error = false;
     size_t totalRead = 0;
@@ -313,39 +338,47 @@ void audioUpdate(Audio* audio)
 {
     if (audio->dirty)
     {
-        currentBuffer = &audio->buffers[audio->editing];
-        int nextEditing = audio->lastPlaying;
-        audio->lastPlaying = audio->playing;
-        audio->playing = audio->editing;
-        audio->editing = nextEditing;
+        while (confirmCurrentBuffer != currentBuffer);
+        printf("swapping sound buffers\n");
 
-        Sound* prevSounds[256];
-        memcpy(prevSounds, audio->buffers[audio->editing].sounds, sizeof(prevSounds));
-        uint32_t count = 0; 
-        for (uint32_t i = 0; i < audio->buffers[audio->editing].numSounds; ++i)
+        PlayingSoundsBuffer* nextPlaying = &audio->buffers[audio->lastPlaying];
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < audio->masterBuffer.numSounds; ++i)
         {
-            if (!prevSounds[i]->finished)
+            if (audio->masterBuffer.sounds[i]->finished)
             {
-                audio->buffers[audio->editing].sounds[count++] = prevSounds[i];
+                free(audio->masterBuffer.sounds[i]);
             }
             else
             {
-                free(prevSounds[i]);
+                audio->masterBuffer.sounds[count] = audio->masterBuffer.sounds[i];
+                nextPlaying->sounds[count] = audio->masterBuffer.sounds[i];
+                ++count;
             }
         }
-        audio->buffers[audio->editing].numSounds = count;
+        audio->masterBuffer.numSounds = count;
+        nextPlaying->numSounds = count;
 
+        int lastPlaying = audio->playing;
+        audio->playing = audio->lastPlaying;
+        audio->lastPlaying = lastPlaying;
+        currentBuffer = nextPlaying;
         audio->dirty = false;
     }
 }
 
-void audioPlaySound(Audio* audio, Sound* sound)
+void audioPlaySound(Audio* audio, Sound* sound, bool loop)
 {
-    if (audio->buffers[audio->editing].numSounds < 256)
+    // PlayingSoundsBuffer* buffer = &audio->buffers[audio->lastPlaying];
+    PlayingSoundsBuffer* buffer = &audio->masterBuffer;
+    if (buffer->numSounds < 256)
     {
-        Sound* newSound = malloc(sizeof(Sound));
-        memcpy(newSound, sound, sizeof(Sound));
-        audio->buffers[audio->editing].sounds[audio->buffers[audio->editing].numSounds++] = newSound;
+        printf("adding sound\n");
+        PlayingSoundInfo* info = malloc(sizeof(PlayingSoundInfo));
+        memset(info, 0, sizeof(*info));
+        info->sound = sound;
+        info->loop = loop;
+        buffer->sounds[buffer->numSounds++] = info;
         audio->dirty = true;
     }
 }

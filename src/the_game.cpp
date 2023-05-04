@@ -258,7 +258,6 @@ TheGame::TheGame() :
     depots.create(depotTrigger);
 
     createPlayer({ 0, 0 });
-
 }
 
 TheGame::~TheGame()
@@ -268,6 +267,7 @@ TheGame::~TheGame()
         glDeleteTextures(1, &texture);
     }
     stopAudioStream(audio);
+    freeSound(bonkSound);
     cleanupAudio(audio);
     freeAudio(audio);
 }
@@ -1342,7 +1342,7 @@ void TheGame::onWeaponCollision(uint32_t index, uint32_t other, const CollisionR
         {
             health.value -= hurtbox.multiplier * weapon.damage;
             health.takingDamage = true;
-            audioPlaySound(audio, bonkSound);
+            audioPlaySound(audio, bonkSound, false);
         }
     }
 }

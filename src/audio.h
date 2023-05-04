@@ -22,7 +22,7 @@ Sound* newSound(const char* filename, bool loop);
 void freeSound(Sound* sound);
 
 void audioUpdate(Audio* audio);
-void audioPlaySound(Audio* audio, Sound* sound);
+void audioPlaySound(Audio* audio, Sound* sound, bool loop);
 
 #ifdef __cplusplus
 }
