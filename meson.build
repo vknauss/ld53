@@ -18,6 +18,7 @@ depends = [
   dependency('GL'),
   dependency('glm'),
   # dependency('portaudio-2.0'),
+  dependency('ogg'),
   dependency('vorbisfile'),
   portaudio_cmake.dependency('PortAudio')
 ]

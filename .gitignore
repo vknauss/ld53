@@ -1,3 +1,7 @@
 .cache
+.vs
 build
 dist/*/*
+subprojects/*
+!subprojects/*.wrap
+!subprojects/packagefiles
