@@ -59,11 +59,6 @@ static int streamCallback(const void* inputBuffer, void* outputBuffer, unsigned 
 {
     Audio* audio = userData;
 
-    if (confirmCurrentBuffer != currentBuffer)
-    {
-        printf("new buffer received. num sounds: %d\n", currentBuffer->numSounds);
-    }
-
     PlayingSoundsBuffer* soundBuffer = confirmCurrentBuffer = currentBuffer;
     memset(outputBuffer, 0, sizeof(float) * audio->numChannels * framesPerBuffer);
 
@@ -177,10 +172,6 @@ bool initAudio(Audio* audio)
         return false;
     }
 
-    /* printf("Selected audio output device: %s\n", deviceInfo->name);
-    printf("\tChannels: %d\n\tSample rate: %f\n", deviceInfo->maxOutputChannels, deviceInfo->defaultSampleRate);
-    printf("\tDefault latencies: Low: %f, High: %f\n", deviceInfo->defaultLowOutputLatency, deviceInfo->defaultHighOutputLatency); */
-
     audio->numChannels = deviceInfo->maxOutputChannels > 2 ? 2 : deviceInfo->maxOutputChannels;
 
     PaStreamParameters streamParameters;
@@ -287,8 +278,6 @@ Sound* newSound(const char* filename, bool loop)
     sound->numFrames = ov_pcm_total(&file, -1);
     sound->numChannels = info->channels;
     sound->samples = malloc(sizeof(float) * sound->numChannels * sound->numFrames);
-    /* sound->loop = loop;
-    sound->finished = false; */
 
     bool error = false;
     size_t totalRead = 0;
@@ -339,7 +328,6 @@ void audioUpdate(Audio* audio)
     if (audio->dirty)
     {
         while (confirmCurrentBuffer != currentBuffer);
-        printf("swapping sound buffers\n");
 
         PlayingSoundsBuffer* nextPlaying = &audio->buffers[audio->lastPlaying];
         uint32_t count = 0;
@@ -353,6 +341,7 @@ void audioUpdate(Audio* audio)
             {
                 audio->masterBuffer.sounds[count] = audio->masterBuffer.sounds[i];
                 nextPlaying->sounds[count] = audio->masterBuffer.sounds[i];
+                nextPlaying->finished[count] = 0;
                 ++count;
             }
         }
@@ -369,11 +358,9 @@ void audioUpdate(Audio* audio)
 
 void audioPlaySound(Audio* audio, Sound* sound, bool loop)
 {
-    // PlayingSoundsBuffer* buffer = &audio->buffers[audio->lastPlaying];
     PlayingSoundsBuffer* buffer = &audio->masterBuffer;
     if (buffer->numSounds < 256)
     {
-        printf("adding sound\n");
         PlayingSoundInfo* info = malloc(sizeof(PlayingSoundInfo));
         memset(info, 0, sizeof(*info));
         info->sound = sound;
